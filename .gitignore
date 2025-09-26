@@ -1,0 +1,82 @@
+# Xcode
+.DS_Store
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.xcworkspace/xcuserdata/
+*.xcuserdatad
+*.moved-aside
+DerivedData/
+build/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+
+# CocoaPods
+Pods/
+Podfile.lock
+
+# Carthage
+Carthage/Build/
+Carthage/Checkouts/
+Carthage/DerivedData/
+
+# Accio dependency manager
+Dependencies/
+.accio/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Xcode Server / Continuous Integration
+xcshareddata/
+*.xccoverage
+*.gcno
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift Playgrounds
+*.playgroundbook
+
+# macOS
+*.DS_Store
+*.AppleDouble
+*.LSOverride
+
+# Thumbnails
+._*
+
+# Temporary files
+*.swp
+*.lock
+*.tmp
+*.orig
+
+# SwiftLint cache
+.swiftlint.yml
+.swiftlint.cache
+
+# Tuist
+Tuist/Dependencies/
+
+# User-specific Xcode settings
+xcuserdata/
+
+# Firebase / Crashlytics
+GoogleService-Info.plist
+*.xcframework
+
+# Other tools
+.idea/
+.vscode/
