@@ -546,3 +546,74 @@ struct SpatialHashGridTests {
     }
 }
 
+
+@Suite("LevelBlueprint")
+struct LevelBlueprintTests {
+
+    private func makeBlank() -> LevelBlueprint {
+        LevelBlueprint(rows: 4, columns: 4, tileSize: 32)
+    }
+
+    @Test
+    func toggleSolidFlipsState() {
+        var blueprint = makeBlank()
+        let point = GridPoint(row: 1, column: 2)
+        #expect(blueprint.tile(at: point) == .empty)
+        blueprint.toggleSolid(at: point)
+        #expect(blueprint.tile(at: point) == .stone)
+        blueprint.toggleSolid(at: point)
+        #expect(blueprint.tile(at: point) == .empty)
+    }
+
+    @Test
+    func spawnLifecycle() {
+        var blueprint = makeBlank()
+        let origin = GridPoint(row: 0, column: 0)
+        let moved = GridPoint(row: 2, column: 3)
+        let spawn = blueprint.addSpawnPoint(named: "Start", at: origin)
+        #expect(spawn != nil)
+        guard let spawnID = spawn?.id else { return }
+
+        blueprint.renameSpawn(id: spawnID, to: "Player 1")
+        #expect(blueprint.spawnPoint(id: spawnID)?.name == "Player 1")
+
+        blueprint.updateSpawn(id: spawnID, to: moved)
+        #expect(blueprint.spawnPoint(id: spawnID)?.coordinate == moved)
+
+        if let existing = blueprint.spawnPoint(id: spawnID) {
+            blueprint.removeSpawn(existing)
+        }
+        #expect(blueprint.spawnPoints.isEmpty)
+    }
+
+    @Test
+    func ignoresOutOfBoundsEdits() {
+        var blueprint = makeBlank()
+        let out = GridPoint(row: -1, column: 99)
+        blueprint.setTile(.stone, at: out)
+        #expect(blueprint.solidTiles().isEmpty)
+    }
+
+    @Test
+    func movingPlatformLifecycle() {
+        var blueprint = makeBlank()
+        let origin = GridPoint(row: 1, column: 1)
+        let size = GridSize(rows: 1, columns: 3)
+        let target = GridPoint(row: 2, column: 4)
+        let platform = blueprint.addMovingPlatform(origin: origin, size: size, target: target, speed: 2.5)
+        #expect(platform != nil)
+        #expect(blueprint.movingPlatforms.count == 1)
+        let id = platform!.id
+
+        blueprint.updateMovingPlatform(id: id) { ref in
+            ref.target = GridPoint(row: 3, column: 5)
+            ref.speed = 1.5
+        }
+        let updated = blueprint.movingPlatform(id: id)
+        #expect(updated?.target == GridPoint(row: 3, column: 5))
+        #expect(updated?.speed == 1.5)
+
+        blueprint.removeMovingPlatform(id: id)
+        #expect(blueprint.movingPlatforms.isEmpty)
+    }
+}

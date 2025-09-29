@@ -309,6 +309,8 @@ final class SpatialHashDemoModel: ObservableObject {
 // MARK: - View
 
 public struct SpatialHashGridDemoView: View {
+    @Environment(\.displayScale) private var displayScale
+    
     @StateObject private var model = SpatialHashDemoModel()
     @StateObject private var driver = DisplayLinkDriver()
     @State private var lastTick = CACurrentMediaTime()
@@ -366,7 +368,7 @@ public struct SpatialHashGridDemoView: View {
                         cg.setShouldAntialias(false)
 
                         let levels = (qualityLevel == 0 ? 4 : (qualityLevel == 1 ? 3 : 2))
-                        let bucketCount = levels * levels * levels
+                        //let bucketCount = levels * levels * levels
 //                        Removed line:
 //                        if colorKeys.count != model.units.count { colorKeys = Array(repeating: 0, count: model.units.count) }
 
@@ -590,18 +592,11 @@ public struct SpatialHashGridDemoView: View {
     }
 
     private func currentImageScale() -> CGFloat {
-        #if canImport(UIKit)
-        let native = UIScreen.main.scale
-        #else
-        let native: CGFloat = 2.0
-        #endif
+        let native = displayScale
         switch qualityLevel {
-        case 0: // high
-            return native
-        case 1: // medium
-            return max(1.0, min(native, 2.0))
-        default: // low
-            return 1.0
+        case 0: return native
+        case 1: return max(1.0, min(native, 2.0))
+        default: return 1.0
         }
     }
 
@@ -611,11 +606,7 @@ public struct SpatialHashGridDemoView: View {
         isBuildingNonSpecialsImage = true
 
         // Snapshot data on main thread
-        #if canImport(UIKit)
-        let scale = UIScreen.main.scale
-        #else
-        let scale: CGFloat = 2.0
-        #endif
+        let scale = displayScale
 
         struct NSItem { let x: Double; let y: Double; let r: Double; let rgb: SIMD3<Double> }
         var items: [NSItem] = []

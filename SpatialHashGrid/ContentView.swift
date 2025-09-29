@@ -8,15 +8,38 @@
 import SwiftUI
 
 struct ContentView: View {
+    private enum Demo: String, CaseIterable, Identifiable {
+        case editor = "Editor"
+        case swiftUI = "SwiftUI"
+        case spriteKit = "SpriteKit"
+
+        var id: Demo { self }
+    }
+
+    @State private var selection: Demo = .editor
+
     var body: some View {
-        SpatialHashGridDemoView()
-//        VStack {
-//            Image(systemName: "globe")
-//                .imageScale(.large)
-//                .foregroundStyle(.tint)
-//            Text("Hello, world!")
-//        }
-//        .padding()
+        VStack(spacing: 0) {
+            Picker("Demo", selection: $selection) {
+                ForEach(Demo.allCases) { demo in
+                    Text(demo.rawValue).tag(demo)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding()
+
+            Group {
+                switch selection {
+                case .editor:
+                    MapEditorView()
+                case .swiftUI:
+                    GameDemoView()
+                case .spriteKit:
+                    SpriteKitGameDemoView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 }
 

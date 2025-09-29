@@ -493,7 +493,7 @@ public final class SpatialHashGrid<ID: Hashable> {
     ///   - cellKeys: Scratch array to collect traversed cell keys; cleared on entry.
     @inlinable
     @inline(__always)
-    public func raycast(from a: Vec2, to b: Vec2, into out: inout [ID], scratch seen: inout Set<ID>, cellKeys cellKeys: inout [UInt64]) {
+    public func raycast(from a: Vec2, to b: Vec2, into out: inout [ID], scratch seen: inout Set<ID>, cellKeys: inout [UInt64]) {
         out.removeAll(keepingCapacity: true)
         seen.removeAll(keepingCapacity: true)
         cellKeys.removeAll(keepingCapacity: true)
