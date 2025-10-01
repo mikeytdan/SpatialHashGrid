@@ -221,6 +221,33 @@ final class MapEditorViewModel: ObservableObject {
         syncSelectedSentry()
     }
 
+    func duplicateSelectedSentry() {
+        guard let sentry = selectedSentry else { return }
+        guard let destination = findVacantSentryCoordinate(near: sentry.coordinate) else { return }
+        let duplicate = SentryBlueprint(
+            coordinate: destination,
+            scanRange: sentry.scanRange,
+            scanCenterDegrees: sentry.scanCenterDegrees,
+            scanArcDegrees: sentry.scanArcDegrees,
+            sweepSpeedDegreesPerSecond: sentry.sweepSpeedDegreesPerSecond,
+            fireCooldown: sentry.fireCooldown,
+            projectileSpeed: sentry.projectileSpeed,
+            projectileSize: sentry.projectileSize,
+            projectileLifetime: sentry.projectileLifetime,
+            projectileBurstCount: sentry.projectileBurstCount,
+            projectileSpreadDegrees: sentry.projectileSpreadDegrees,
+            aimToleranceDegrees: sentry.aimToleranceDegrees,
+            initialFacingDegrees: sentry.initialFacingDegrees,
+            projectileKind: sentry.projectileKind,
+            heatSeekingTurnRateDegreesPerSecond: sentry.heatSeekingTurnRateDegreesPerSecond
+        )
+        captureSnapshot()
+        if let created = blueprint.addSentry(duplicate) {
+            selectedSentryID = created.id
+            syncSelectedSentry()
+        }
+    }
+
     func updateSelectedSentryRange(_ range: Double) {
         guard let sentry = selectedSentry else { return }
         let clamped = max(1.0, min(range, 32.0))
@@ -303,11 +330,76 @@ final class MapEditorViewModel: ObservableObject {
 
     func updateSelectedSentryProjectileSpeed(_ speed: Double) {
         guard let sentry = selectedSentry else { return }
-        let clamped = max(200.0, min(speed, 1500.0))
+        let clamped = max(50.0, min(speed, 2000.0))
         guard abs(sentry.projectileSpeed - clamped) > 0.0001 else { return }
         captureSnapshot()
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.projectileSpeed = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryProjectileSize(_ size: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(0.05, min(size, 2.0))
+        guard abs(sentry.projectileSize - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.projectileSize = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryProjectileLifetime(_ lifetime: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(0.1, min(lifetime, 12.0))
+        guard abs(sentry.projectileLifetime - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.projectileLifetime = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryProjectileBurstCount(_ count: Int) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(1, min(count, 12))
+        guard sentry.projectileBurstCount != clamped else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.projectileBurstCount = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryProjectileSpread(_ degrees: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(0.0, min(degrees, 90.0))
+        guard abs(sentry.projectileSpreadDegrees - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.projectileSpreadDegrees = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryHeatTurnRate(_ degreesPerSecond: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(30.0, min(degreesPerSecond, 720.0))
+        guard abs(sentry.heatSeekingTurnRateDegreesPerSecond - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.heatSeekingTurnRateDegreesPerSecond = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryProjectileKind(_ kind: SentryBlueprint.ProjectileKind) {
+        guard let sentry = selectedSentry else { return }
+        guard sentry.projectileKind != kind else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.projectileKind = kind
         }
         syncSelectedSentry()
     }
@@ -363,6 +455,22 @@ final class MapEditorViewModel: ObservableObject {
             ref.initialProgress = clamped
         }
         syncSelectedPlatform()
+    }
+
+    func duplicateSelectedPlatform() {
+        guard let platform = selectedPlatform else { return }
+        let placement = placementForDuplicate(of: platform)
+        captureSnapshot()
+        if let duplicate = blueprint.addMovingPlatform(
+            origin: placement.origin,
+            size: platform.size,
+            target: placement.target,
+            speed: platform.speed,
+            initialProgress: platform.initialProgress
+        ) {
+            selectedPlatformID = duplicate.id
+            syncSelectedPlatform()
+        }
     }
 
     func handleDragBegan(at point: GridPoint) {
@@ -767,6 +875,23 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.sentry(at: point)
     }
 
+    private func findVacantSentryCoordinate(near point: GridPoint) -> GridPoint? {
+        let limit = max(1, max(blueprint.rows, blueprint.columns))
+        for radius in 1...limit {
+            for row in -radius...radius {
+                for col in -radius...radius {
+                    if max(abs(row), abs(col)) != radius { continue }
+                    let candidate = point.offsetting(rowDelta: row, columnDelta: col)
+                    guard blueprint.contains(candidate) else { continue }
+                    if blueprint.sentry(at: candidate) == nil {
+                        return candidate
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     private func clampTargetRow(_ row: Int, for platform: MovingPlatformBlueprint) -> Int {
         let range = platformTargetRowRange(platform)
         return min(max(row, range.lowerBound), range.upperBound)
@@ -775,6 +900,34 @@ final class MapEditorViewModel: ObservableObject {
     private func clampTargetColumn(_ column: Int, for platform: MovingPlatformBlueprint) -> Int {
         let range = platformTargetColumnRange(platform)
         return min(max(column, range.lowerBound), range.upperBound)
+    }
+
+    private func placementForDuplicate(of platform: MovingPlatformBlueprint) -> (origin: GridPoint, target: GridPoint) {
+        let horizontal = platform.size.columns + 1
+        let vertical = platform.size.rows + 1
+        let offsets: [(Int, Int)] = [
+            (0, horizontal),
+            (vertical, 0),
+            (0, -horizontal),
+            (-vertical, 0)
+        ]
+
+        for (dr, dc) in offsets {
+            let originCandidate = platform.origin.offsetting(rowDelta: dr, columnDelta: dc)
+            let targetCandidate = platform.target.offsetting(rowDelta: dr, columnDelta: dc)
+            if isValidPlatformPlacement(origin: originCandidate, size: platform.size, target: targetCandidate) {
+                return (originCandidate, targetCandidate)
+            }
+        }
+
+        return (platform.origin, platform.target)
+    }
+
+    private func isValidPlatformPlacement(origin: GridPoint, size: GridSize, target: GridPoint) -> Bool {
+        guard blueprint.contains(origin), blueprint.contains(target) else { return false }
+        let originMax = GridPoint(row: origin.row + size.rows - 1, column: origin.column + size.columns - 1)
+        let targetMax = GridPoint(row: target.row + size.rows - 1, column: target.column + size.columns - 1)
+        return blueprint.contains(originMax) && blueprint.contains(targetMax)
     }
 
     private func sentryAngleRange(center: Double, arc: Double) -> (lowerBound: Double, upperBound: Double) {
@@ -1154,16 +1307,87 @@ struct MapEditorView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    let kindBinding = Binding<SentryBlueprint.ProjectileKind>(
+                        get: { viewModel.selectedSentry?.projectileKind ?? sentry.projectileKind },
+                        set: { viewModel.updateSelectedSentryProjectileKind($0) }
+                    )
+                    Picker("Projectile Type", selection: kindBinding) {
+                        ForEach(SentryBlueprint.ProjectileKind.allCases, id: \.self) { kind in
+                            Text(kind.displayLabel).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    let currentKind = viewModel.selectedSentry?.projectileKind ?? sentry.projectileKind
+
                     let projectileBinding = Binding<Double>(
                         get: { viewModel.selectedSentry?.projectileSpeed ?? sentry.projectileSpeed },
                         set: { viewModel.updateSelectedSentryProjectileSpeed($0) }
                     )
                     VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: projectileBinding, in: 200...1500, step: 50)
-                        Text(String(format: "Projectile Speed: %.0f", projectileBinding.wrappedValue))
+                        Slider(value: projectileBinding, in: 50...2000, step: 25)
+                        Text(String(format: currentKind == .laser ? "Beam Intensity: %.0f" : "Projectile Speed: %.0f", projectileBinding.wrappedValue))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+                    .disabled(currentKind == .laser)
+
+                    let sizeBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.projectileSize ?? sentry.projectileSize },
+                        set: { viewModel.updateSelectedSentryProjectileSize($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: sizeBinding, in: 0.05...2.0, step: 0.05)
+                        Text(String(format: "Projectile Size: %.2f tiles", sizeBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let lifetimeBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.projectileLifetime ?? sentry.projectileLifetime },
+                        set: { viewModel.updateSelectedSentryProjectileLifetime($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: lifetimeBinding, in: 0.1...12.0, step: 0.1)
+                        let label = currentKind == .laser ? "Beam Duration" : "Lifetime"
+                        Text(String(format: "%@: %.1fs", label, lifetimeBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let burstBinding = Binding<Int>(
+                        get: { viewModel.selectedSentry?.projectileBurstCount ?? sentry.projectileBurstCount },
+                        set: { viewModel.updateSelectedSentryProjectileBurstCount($0) }
+                    )
+                    Stepper(value: burstBinding, in: 1...12) {
+                        Text("Burst Count: \(burstBinding.wrappedValue)")
+                    }
+
+                    let spreadBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.projectileSpreadDegrees ?? sentry.projectileSpreadDegrees },
+                        set: { viewModel.updateSelectedSentryProjectileSpread($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: spreadBinding, in: 0...90, step: 1)
+                        Text(String(format: "Spread: %.0f°", spreadBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .disabled(burstBinding.wrappedValue <= 1)
+
+                    if currentKind == .heatSeeking {
+                        let turnBinding = Binding<Double>(
+                            get: { viewModel.selectedSentry?.heatSeekingTurnRateDegreesPerSecond ?? sentry.heatSeekingTurnRateDegreesPerSecond },
+                            set: { viewModel.updateSelectedSentryHeatTurnRate($0) }
+                        )
+                        VStack(alignment: .leading, spacing: 4) {
+                            Slider(value: turnBinding, in: 30...720, step: 10)
+                            Text(String(format: "Turn Rate: %.0f°/s", turnBinding.wrappedValue))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     let cooldownBinding = Binding<Double>(
                         get: { viewModel.selectedSentry?.fireCooldown ?? sentry.fireCooldown },
                         set: { viewModel.updateSelectedSentryCooldown($0) }
@@ -1179,6 +1403,13 @@ struct MapEditorView: View {
                     Stepper(value: toleranceBinding, in: 2...45, step: 1) {
                         Text(String(format: "Aim Tolerance: %.0f°", toleranceBinding.wrappedValue))
                     }
+
+                    Button {
+                        viewModel.duplicateSelectedSentry()
+                    } label: {
+                        Label("Duplicate Sentry", systemImage: "plus.square.on.square")
+                    }
+                    .buttonStyle(.bordered)
 
                     Button(role: .destructive) {
                         viewModel.removeSentry(sentry)
@@ -1302,6 +1533,13 @@ struct MapEditorView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    Button {
+                        viewModel.duplicateSelectedPlatform()
+                    } label: {
+                        Label("Duplicate Platform", systemImage: "plus.square.on.square")
+                    }
+                    .buttonStyle(.bordered)
+
                     Button(role: .destructive) {
                         viewModel.removePlatform(platform)
                     } label: {
@@ -1411,7 +1649,7 @@ struct MapEditorView: View {
         }
     }
 
-    private func handleEditorCommand(for keyPress: KeyPress) -> Bool {
+private func handleEditorCommand(for keyPress: KeyPress) -> Bool {
         let normalized = keyPress.characters.lowercased()
         let hasCommand = keyPress.modifiers.contains(.command)
         let hasShift = keyPress.modifiers.contains(.shift)
@@ -1483,6 +1721,16 @@ struct MapEditorView: View {
         guard !isPreviewing else { return }
         guard !viewModel.blueprint.spawnPoints.isEmpty else { return }
         isPreviewing = true
+    }
+}
+
+private extension SentryBlueprint.ProjectileKind {
+    var displayLabel: String {
+        switch self {
+        case .bolt: return "Bolt"
+        case .heatSeeking: return "Heat"
+        case .laser: return "Laser"
+        }
     }
 }
 

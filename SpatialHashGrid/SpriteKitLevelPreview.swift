@@ -33,6 +33,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     private var solidMask: [[Bool]] = []
     private var sentryStates: [SentryRuntimeState] = []
     private var projectileStates: [ProjectileRuntimeState] = []
+    private var laserStates: [LaserRuntimeState] = []
 
     private struct PlatformRuntimeState {
         let blueprint: MovingPlatformBlueprint
@@ -59,10 +60,27 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
 
     private struct ProjectileRuntimeState {
         let id: UUID
+        let ownerID: UUID
+        let kind: SentryBlueprint.ProjectileKind
         var position: Vec2
         var velocity: Vec2
+        var speed: Double
+        var size: Double
+        var rotation: Double
         var age: Double
+        let lifetime: Double
         var alive: Bool
+        let turnRate: Double
+    }
+
+    private struct LaserRuntimeState {
+        let id: UUID
+        let ownerID: UUID
+        var origin: Vec2
+        var end: Vec2
+        var width: Double
+        var age: Double
+        let duration: Double
     }
 
     init(blueprint: LevelBlueprint) {
@@ -134,6 +152,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         stepPlatforms(dt: dt)
         updateSentries(dt: dt)
         updateProjectiles(dt: dt)
+        updateLasers(dt: dt)
     }
 
     func colliders() -> [Collider] {
@@ -192,7 +211,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
             let endCenter = endAABB.center
             let distance = (endCenter - startCenter).length
             let clampedProgress = max(0.0, min(platform.initialProgress, 1.0))
-            var state = PlatformRuntimeState(
+            let state = PlatformRuntimeState(
                 blueprint: platform,
                 colliderID: colliderID,
                 startMin: startAABB.min,
@@ -276,6 +295,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
             )
         }
         projectileStates.removeAll(keepingCapacity: true)
+        laserStates.removeAll(keepingCapacity: true)
     }
 
     struct SentrySnapshot: Identifiable {
@@ -290,6 +310,19 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     struct ProjectileSnapshot: Identifiable {
         let id: UUID
         let position: Vec2
+        let radius: Double
+        let rotation: Double
+        let kind: SentryBlueprint.ProjectileKind
+        let ownerID: UUID
+    }
+
+    struct LaserSnapshot: Identifiable {
+        let id: UUID
+        let origin: Vec2
+        let end: Vec2
+        let width: Double
+        let ownerID: UUID
+        let progress: Double
     }
 
     func sentrySnapshots() -> [SentrySnapshot] {
@@ -308,7 +341,28 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     func projectileSnapshots() -> [ProjectileSnapshot] {
         projectileStates.compactMap { projectile in
             guard projectile.alive else { return nil }
-            return ProjectileSnapshot(id: projectile.id, position: projectile.position)
+            return ProjectileSnapshot(
+                id: projectile.id,
+                position: projectile.position,
+                radius: projectile.size * tileSize,
+                rotation: projectile.rotation,
+                kind: projectile.kind,
+                ownerID: projectile.ownerID
+            )
+        }
+    }
+
+    func laserSnapshots() -> [LaserSnapshot] {
+        laserStates.compactMap { laser in
+            guard laser.age <= laser.duration else { return nil }
+            return LaserSnapshot(
+                id: laser.id,
+                origin: laser.origin,
+                end: laser.end,
+                width: laser.width,
+                ownerID: laser.ownerID,
+                progress: laser.age / max(laser.duration, 0.0001)
+            )
         }
     }
 
@@ -360,7 +414,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
                 let tolerance = max(1.0, blueprint.aimToleranceDegrees) * .pi / 180.0
                 let aimDiff = normalizedAngle(playerAngle - state.angle)
                 if abs(aimDiff) <= tolerance && state.cooldown <= 0 && hasLineOfSightNow {
-                    fireProjectile(from: state.position, toward: playerPosition, speed: blueprint.projectileSpeed)
+                    fireSentryWeapons(state: state)
                     state.cooldown = blueprint.fireCooldown
                 }
             } else {
@@ -393,24 +447,43 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         guard !projectileStates.isEmpty else { return }
         let playerCenter = player.body.position
         let playerRadius = tileSize * 0.4
-        let projectileRadius = tileSize * 0.18
         for index in projectileStates.indices {
             var projectile = projectileStates[index]
             guard projectile.alive else { continue }
             projectile.age += dt
-            if projectile.age > 5.0 {
+            if projectile.age > projectile.lifetime {
                 projectile.alive = false
                 projectileStates[index] = projectile
                 continue
             }
+            switch projectile.kind {
+            case .heatSeeking:
+                let toPlayer = playerCenter - projectile.position
+                if toPlayer.length > 1e-4 {
+                    let desiredAngle = atan2(toPlayer.y, toPlayer.x)
+                    let delta = normalizedAngle(desiredAngle - projectile.rotation)
+                    let maxTurn = projectile.turnRate * dt
+                    let applied = min(max(delta, -maxTurn), maxTurn)
+                    let newAngle = projectile.rotation + applied
+                    let dir = Vec2(cos(newAngle), sin(newAngle))
+                    projectile.velocity = dir * projectile.speed
+                    projectile.rotation = normalizedAngle(newAngle)
+                }
+            default:
+                break
+            }
+
             projectile.position += projectile.velocity * dt
+            projectile.rotation = normalizedAngle(atan2(projectile.velocity.y, projectile.velocity.x))
 
             if !withinWorld(projectile.position) || hitsSolid(at: projectile.position) {
                 projectile.alive = false
             } else {
                 let delta = projectile.position - playerCenter
+                let projectileRadius = projectile.size * tileSize
                 if delta.length <= (playerRadius + projectileRadius) {
-                    let impulse = projectile.velocity.normalized * 260.0
+                    let impulseMagnitude = max(160.0, min(projectile.speed * 0.35, 420.0))
+                    let impulse = projectile.velocity.normalized * impulseMagnitude
                     player.body.velocity += impulse
                     projectile.alive = false
                 }
@@ -422,20 +495,147 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         projectileStates.removeAll { !$0.alive }
     }
 
-    private func fireProjectile(from origin: Vec2, toward target: Vec2, speed: Double) {
-        var direction = target - origin
-        if direction.length < 1e-3 {
-            direction = Vec2(1, 0)
+    private func updateLasers(dt: Double) {
+        guard !laserStates.isEmpty else { return }
+        for index in laserStates.indices {
+            laserStates[index].age += dt
         }
-        direction = direction.normalized
+        laserStates.removeAll { $0.age > $0.duration }
+    }
+
+    private func fireSentryWeapons(state: SentryRuntimeState) {
+        let blueprint = state.blueprint
+        let offsets = burstAngleOffsets(count: blueprint.projectileBurstCount, spreadDegrees: blueprint.projectileSpreadDegrees)
+        switch blueprint.projectileKind {
+        case .laser:
+            for offset in offsets {
+                let angle = state.angle + offset
+                fireLaser(from: state.position, angle: angle, blueprint: blueprint)
+            }
+        case .bolt, .heatSeeking:
+            for offset in offsets {
+                let angle = state.angle + offset
+                let direction = Vec2(cos(angle), sin(angle))
+                spawnProjectile(
+                    ownerID: blueprint.id,
+                    kind: blueprint.projectileKind,
+                    origin: state.position,
+                    direction: direction,
+                    speed: blueprint.projectileSpeed,
+                    size: blueprint.projectileSize,
+                    lifetime: blueprint.projectileLifetime,
+                    turnRate: blueprint.heatSeekingTurnRateDegreesPerSecond
+                )
+            }
+        }
+    }
+
+    private func spawnProjectile(
+        ownerID: UUID,
+        kind: SentryBlueprint.ProjectileKind,
+        origin: Vec2,
+        direction: Vec2,
+        speed: Double,
+        size: Double,
+        lifetime: Double,
+        turnRate: Double
+    ) {
+        var dir = direction
+        if dir.length < 1e-5 {
+            dir = Vec2(1, 0)
+        }
+        dir = dir.normalized
+        let launchSpeed = max(50.0, speed)
+        let offset = dir * (tileSize * max(size * 0.6, 0.4))
+        let turnRateRadians = kind == .heatSeeking ? max(0.0, turnRate) * .pi / 180.0 : 0.0
         let projectile = ProjectileRuntimeState(
             id: UUID(),
-            position: origin,
-            velocity: direction * max(100.0, speed),
+            ownerID: ownerID,
+            kind: kind,
+            position: origin + offset,
+            velocity: dir * launchSpeed,
+            speed: launchSpeed,
+            size: size,
+            rotation: atan2(dir.y, dir.x),
             age: 0,
-            alive: true
+            lifetime: max(0.1, lifetime),
+            alive: true,
+            turnRate: turnRateRadians
         )
         projectileStates.append(projectile)
+    }
+
+    private func fireLaser(from origin: Vec2, angle: Double, blueprint: SentryBlueprint) {
+        let maxDistance = blueprint.scanRange * tileSize
+        let direction = Vec2(cos(angle), sin(angle))
+        let start = origin + direction.normalized * (tileSize * max(0.4, blueprint.projectileSize * 0.5))
+        let trace = traceLaser(from: start, direction: direction, maxDistance: maxDistance)
+        let width = max(tileSize * blueprint.projectileSize, tileSize * 0.05)
+        let laser = LaserRuntimeState(
+            id: UUID(),
+            ownerID: blueprint.id,
+            origin: start,
+            end: trace.end,
+            width: width,
+            age: 0,
+            duration: max(0.05, blueprint.projectileLifetime)
+        )
+        laserStates.append(laser)
+        if trace.hitPlayer {
+            let impulseMagnitude = max(200.0, min(blueprint.projectileSpeed * 0.5, 600.0))
+            let impulse = direction.normalized * impulseMagnitude
+            player.body.velocity += impulse
+        }
+    }
+
+    private struct LaserTrace {
+        let end: Vec2
+        let hitPlayer: Bool
+    }
+
+    private func traceLaser(from origin: Vec2, direction: Vec2, maxDistance: Double) -> LaserTrace {
+        var dir = direction
+        if dir.length < 1e-5 {
+            dir = Vec2(1, 0)
+        }
+        dir = dir.normalized
+        let playerCenter = player.body.position
+        let playerRadius = tileSize * 0.4
+        let stepDistance = max(tileSize * 0.2, maxDistance / 200.0)
+        let steps = Int(maxDistance / stepDistance)
+        var position = origin
+        for _ in 0..<steps {
+            position += dir * stepDistance
+            if !withinWorld(position) {
+                let clampedX = min(max(position.x, 0), worldWidth)
+                let clampedY = min(max(position.y, 0), worldHeight)
+                return LaserTrace(end: Vec2(clampedX, clampedY), hitPlayer: false)
+            }
+            if hitsSolid(at: position) {
+                return LaserTrace(end: position, hitPlayer: false)
+            }
+            let delta = position - playerCenter
+            if delta.length <= playerRadius {
+                return LaserTrace(end: playerCenter, hitPlayer: true)
+            }
+        }
+        return LaserTrace(end: origin + dir * maxDistance, hitPlayer: false)
+    }
+
+    private func burstAngleOffsets(count: Int, spreadDegrees: Double) -> [Double] {
+        let clampedCount = max(1, count)
+        let spread = max(0.0, spreadDegrees) * .pi / 180.0
+        guard clampedCount > 1, spread > 0.0001 else {
+            return Array(repeating: 0.0, count: clampedCount)
+        }
+        let half = spread * 0.5
+        if clampedCount == 2 {
+            return [-half, half]
+        }
+        let step = spread / Double(clampedCount - 1)
+        return (0..<clampedCount).map { index in
+            -half + step * Double(index)
+        }
     }
 
     private func hasLineOfSight(from origin: Vec2, to target: Vec2, maxDistance: Double) -> Bool {
@@ -492,6 +692,7 @@ final class SpriteKitLevelPreviewScene: SKScene {
     private let runtime: LevelPreviewRuntime
     private let input: InputController
     private let onCommand: (GameCommand) -> Void
+    private let controllers: GameControllerManager?
     private let worldNode = SKNode()
     private var staticTileNode: SKNode?
     private var playerNode = SKSpriteNode(color: .green, size: .zero)
@@ -499,10 +700,14 @@ final class SpriteKitLevelPreviewScene: SKScene {
     private var platformNodes: [UUID: SKSpriteNode] = [:]
     private var sentryNodes: [UUID: SentryNode] = [:]
     private var projectileNodes: [UUID: SKShapeNode] = [:]
+    private var laserNodes: [UUID: SKShapeNode] = [:]
 
-    init(runtime: LevelPreviewRuntime, input: InputController, onCommand: @escaping (GameCommand) -> Void) {
+    private var lastControllerUpdateTime: TimeInterval?
+
+    init(runtime: LevelPreviewRuntime, input: InputController, controllers: GameControllerManager?, onCommand: @escaping (GameCommand) -> Void) {
         self.runtime = runtime
         self.input = input
+        self.controllers = controllers
         self.onCommand = onCommand
         let size = CGSize(width: runtime.worldWidth, height: runtime.worldHeight)
         super.init(size: size)
@@ -530,8 +735,52 @@ final class SpriteKitLevelPreviewScene: SKScene {
         // 1) Poll input (safe; not inside SwiftUI view update)
         let s = input.sample()
 
+        var axis = s.axisX
+
+        if let controllers {
+            let dt: TimeInterval
+            if let last = lastControllerUpdateTime {
+                dt = max(0, currentTime - last)
+            } else {
+                dt = 1.0 / 60.0
+            }
+            lastControllerUpdateTime = currentTime
+            controllers.update(frameTime: dt)
+
+            if let state = controllers.state(for: 1) {
+                let stickAxis = Double(state.move.x)
+                var digitalAxis = 0.0
+                if state.buttons.contains(.dpadLeft) { digitalAxis -= 1 }
+                if state.buttons.contains(.dpadRight) { digitalAxis += 1 }
+                var controllerAxis = stickAxis
+                if abs(controllerAxis) < 0.01 { controllerAxis = digitalAxis }
+                controllerAxis = max(-1, min(1, controllerAxis))
+                if abs(controllerAxis) > abs(axis) {
+                    axis = controllerAxis
+                }
+
+                if state.justPressed.contains(.south) || state.justPressed.contains(.north) {
+                    runtime.queueJump()
+                }
+
+                var commands: GameCommand = []
+                if state.justPressed.contains(.pause) || state.justPressed.contains(.menu) {
+                    commands.insert(.stop)
+                }
+                if state.justPressed.contains(.west) {
+                    commands.insert(.undo)
+                }
+                if state.justPressed.contains(.east) {
+                    commands.insert(.redo)
+                }
+                if !commands.isEmpty {
+                    onCommand(commands)
+                }
+            }
+        }
+
         // 2) Continuous: movement axis from held state
-        runtime.moveAxis = s.axisX
+        runtime.moveAxis = axis
 
         // 3) Edge: jump / undo / redo / stop
         if s.jumpPressedEdge { runtime.queueJump() }
@@ -544,6 +793,7 @@ final class SpriteKitLevelPreviewScene: SKScene {
         syncPlayerNode()
         syncPlatformNodes()
         syncSentryNodes()
+        syncLaserNodes()
         syncProjectileNodes()
     }
 
@@ -615,7 +865,10 @@ final class SpriteKitLevelPreviewScene: SKScene {
     private func rebuildSentryNodes() {
         for (_, node) in sentryNodes { node.removeFromParent() }
         sentryNodes.removeAll()
+        for (_, node) in laserNodes { node.removeFromParent() }
+        laserNodes.removeAll()
         syncSentryNodes()
+        syncLaserNodes()
         syncProjectileNodes()
     }
 
@@ -669,15 +922,36 @@ final class SpriteKitLevelPreviewScene: SKScene {
     private func syncProjectileNodes() {
         var seen: Set<UUID> = []
         for snapshot in runtime.projectileSnapshots() {
-            let node = projectileNodes[snapshot.id] ?? makeProjectileNode()
-            projectileNodes[snapshot.id] = node
-            node.position = convertToSpriteKitPoint(snapshot.position)
+            let node = projectileNodes[snapshot.id] ?? {
+                let created = makeProjectileNode(for: snapshot)
+                projectileNodes[snapshot.id] = created
+                return created
+            }()
+            updateProjectileNode(node, with: snapshot)
             seen.insert(snapshot.id)
         }
 
         for (id, node) in projectileNodes where !seen.contains(id) {
             node.removeFromParent()
             projectileNodes.removeValue(forKey: id)
+        }
+    }
+
+    private func syncLaserNodes() {
+        var seen: Set<UUID> = []
+        for snapshot in runtime.laserSnapshots() {
+            let node = laserNodes[snapshot.id] ?? {
+                let created = makeLaserNode()
+                laserNodes[snapshot.id] = created
+                return created
+            }()
+            updateLaserNode(node, with: snapshot)
+            seen.insert(snapshot.id)
+        }
+
+        for (id, node) in laserNodes where !seen.contains(id) {
+            node.removeFromParent()
+            laserNodes.removeValue(forKey: id)
         }
     }
 
@@ -689,15 +963,74 @@ final class SpriteKitLevelPreviewScene: SKScene {
         return node
     }
 
-    private func makeProjectileNode() -> SKShapeNode {
-        let radius = CGFloat(runtime.tileSize * 0.18)
-        let node = SKShapeNode(circleOfRadius: radius)
-        node.fillColor = .white
-        node.strokeColor = .clear
-        node.glowWidth = radius * 0.6
+    private func makeProjectileNode(for snapshot: LevelPreviewRuntime.ProjectileSnapshot) -> SKShapeNode {
+        let node = SKShapeNode()
+        node.lineWidth = 0
         node.zPosition = 2.4
+        node.isAntialiased = true
+        worldNode.addChild(node)
+        updateProjectileNode(node, with: snapshot)
+        return node
+    }
+
+    private func updateProjectileNode(_ node: SKShapeNode, with snapshot: LevelPreviewRuntime.ProjectileSnapshot) {
+        let color = sentryColor(for: snapshot.ownerID)
+        node.fillColor = color.withAlphaComponent(snapshot.kind == .heatSeeking ? 0.95 : 0.85)
+        node.strokeColor = color.withAlphaComponent(0.25)
+        node.position = convertToSpriteKitPoint(snapshot.position)
+        node.path = projectilePath(for: snapshot.kind, radius: snapshot.radius)
+        node.zRotation = -CGFloat(snapshot.rotation)
+        node.glowWidth = CGFloat(snapshot.radius * (snapshot.kind == .heatSeeking ? 0.8 : 0.5))
+    }
+
+    private func projectilePath(for kind: SentryBlueprint.ProjectileKind, radius: Double) -> CGPath {
+        let r = CGFloat(max(radius, runtime.tileSize * 0.05))
+        let path = CGMutablePath()
+        switch kind {
+        case .heatSeeking:
+            let length = r * 4.8
+            let halfWidth = r * 0.7
+            path.move(to: CGPoint(x: length * 0.55, y: 0))
+            path.addLine(to: CGPoint(x: -length * 0.45, y: halfWidth))
+            path.addLine(to: CGPoint(x: -length * 0.45, y: -halfWidth))
+            path.closeSubpath()
+        case .bolt:
+            let length = r * 3.6
+            let halfWidth = r * 0.55
+            let rect = CGRect(x: -length * 0.5, y: -halfWidth, width: length, height: halfWidth * 2)
+            path.addRoundedRect(in: rect, cornerWidth: halfWidth, cornerHeight: halfWidth)
+        case .laser:
+            let length = r * 3.0
+            path.move(to: CGPoint(x: -length * 0.5, y: 0))
+            path.addLine(to: CGPoint(x: length * 0.5, y: 0))
+        }
+        return path
+    }
+
+    private func makeLaserNode() -> SKShapeNode {
+        let node = SKShapeNode()
+        node.lineWidth = 4
+        node.strokeColor = .white
+        node.isAntialiased = true
+        node.zPosition = 2.6
+        node.lineCap = .round
         worldNode.addChild(node)
         return node
+    }
+
+    private func updateLaserNode(_ node: SKShapeNode, with snapshot: LevelPreviewRuntime.LaserSnapshot) {
+        let startPoint = convertToSpriteKitPoint(snapshot.origin)
+        let endPoint = convertToSpriteKitPoint(snapshot.end)
+        node.position = startPoint
+        let path = CGMutablePath()
+        path.move(to: .zero)
+        path.addLine(to: CGPoint(x: endPoint.x - startPoint.x, y: endPoint.y - startPoint.y))
+        node.path = path
+        let color = sentryColor(for: snapshot.ownerID)
+        node.strokeColor = color.withAlphaComponent(0.9 - CGFloat(snapshot.progress) * 0.5)
+        node.lineWidth = CGFloat(max(snapshot.width, 1.0))
+        node.glowWidth = node.lineWidth * 0.9
+        node.alpha = max(0.1, 1.0 - CGFloat(snapshot.progress))
     }
 
     private func ensurePlayerNode() {
@@ -852,15 +1185,17 @@ struct SpriteKitLevelPreviewView: View {
     @State private var debugSnapshot: LevelPreviewRuntime.PlayerDebugSnapshot?
     private let onStop: () -> Void
     @State private var key: String = ""
-    
+
     let input: InputController
-    
+    private let controllerManager = GameControllerManager()
+
     @FocusState private var focused: Bool
 
     init(blueprint: LevelBlueprint, input: InputController, onStop: @escaping () -> Void) {
         _runtime = StateObject(wrappedValue: LevelPreviewRuntime(blueprint: blueprint))
         self.input = input
         self.onStop = onStop
+        controllerManager.maxPlayers = 1
     }
 
     var body: some View {
@@ -908,8 +1243,17 @@ struct SpriteKitLevelPreviewView: View {
                     return .ignored
                 }
             }
-            .onAppear(perform: startScene)
-            .onDisappear { runtime.stop() }
+            .onAppear {
+                startScene()
+                controllerManager.start()
+            }
+            .onDisappear {
+                runtime.stop()
+                controllerManager.onButtonDown = nil
+                controllerManager.onButtonUp = nil
+                controllerManager.onRepeat = nil
+                controllerManager.stop()
+            }
             .onReceive(runtime.$frameTick) { tick in
                 guard showDebugHUD else {
                     debugSnapshot = nil
@@ -919,7 +1263,7 @@ struct SpriteKitLevelPreviewView: View {
                     debugSnapshot = runtime.playerDebug()
                 }
             }
-            .onChange(of: showDebugHUD) { value in
+            .onChange(of: showDebugHUD) { _, value in
                 if value {
                     debugSnapshot = runtime.playerDebug()
                 } else {
@@ -934,6 +1278,7 @@ struct SpriteKitLevelPreviewView: View {
             let skScene = SpriteKitLevelPreviewScene(
                 runtime: runtime,
                 input: input,
+                controllers: controllerManager,
                 onCommand: { cmd in
                     // Edge-triggered commands handled here (undo/redo/stop)
                     if cmd.contains(.stop) {
@@ -943,6 +1288,14 @@ struct SpriteKitLevelPreviewView: View {
                 }
             )
             scene = skScene
+            controllerManager.onButtonDown = { [controllerManager, weak runtime] player, button in
+                guard player == 1 else { return }
+                guard button == .pause || button == .menu else { return }
+                // If the controller is gone we synthesize a stop to exit the preview.
+                guard controllerManager.state(for: player) == nil else { return }
+                runtime?.stop()
+                onStop()
+            }
         }
         runtime.start()
         if showDebugHUD {
@@ -955,6 +1308,7 @@ struct SpriteKitLevelPreviewView: View {
             Text("Use ⬅️➡️ or A/D to move, ⬆️/W/Space to jump, Esc to stop preview")
                 .font(.caption.bold())
                 .foregroundStyle(.white)
+            Text("Controllers: left stick or d-pad to move, south/A to jump, menu to stop")
             Text("Drag left half to move, tap right to jump")
             Text("Cmd-Z to undo, Shift-Cmd-Z or Cmd-Y to redo")
             Text("Sentries sweep their arc and fire when they see you—tune them in the editor.")

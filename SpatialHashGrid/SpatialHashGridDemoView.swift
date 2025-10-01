@@ -367,7 +367,7 @@ public struct SpatialHashGridDemoView: View {
                         cg.setAllowsAntialiasing(false)
                         cg.setShouldAntialias(false)
 
-                        let levels = (qualityLevel == 0 ? 4 : (qualityLevel == 1 ? 3 : 2))
+//                        let levels = (qualityLevel == 0 ? 4 : (qualityLevel == 1 ? 3 : 2))
                         //let bucketCount = levels * levels * levels
 //                        Removed line:
 //                        if colorKeys.count != model.units.count { colorKeys = Array(repeating: 0, count: model.units.count) }

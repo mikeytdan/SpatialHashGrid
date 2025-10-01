@@ -6,7 +6,7 @@ import CoreGraphics
 import SwiftUI
 
 /// Grid-based coordinate used for map editing.
-struct GridPoint: Hashable, Identifiable {
+struct GridPoint: nonisolated Hashable, Identifiable {
     let row: Int
     let column: Int
 
@@ -136,6 +136,12 @@ struct MovingPlatformBlueprint: Identifiable, Hashable {
 }
 
 struct SentryBlueprint: Identifiable, Hashable {
+    enum ProjectileKind: String, CaseIterable, Hashable, Codable {
+        case bolt
+        case heatSeeking
+        case laser
+    }
+
     let id: UUID
     var coordinate: GridPoint
     var scanRange: Double
@@ -144,8 +150,14 @@ struct SentryBlueprint: Identifiable, Hashable {
     var sweepSpeedDegreesPerSecond: Double
     var fireCooldown: Double
     var projectileSpeed: Double
+    var projectileSize: Double
+    var projectileLifetime: Double
+    var projectileBurstCount: Int
+    var projectileSpreadDegrees: Double
     var aimToleranceDegrees: Double
     var initialFacingDegrees: Double
+    var projectileKind: ProjectileKind
+    var heatSeekingTurnRateDegreesPerSecond: Double
 
     init(
         id: UUID = UUID(),
@@ -156,8 +168,14 @@ struct SentryBlueprint: Identifiable, Hashable {
         sweepSpeedDegreesPerSecond: Double = 60.0,
         fireCooldown: Double = 1.2,
         projectileSpeed: Double = 900.0,
+        projectileSize: Double = 0.18,
+        projectileLifetime: Double = 5.0,
+        projectileBurstCount: Int = 1,
+        projectileSpreadDegrees: Double = 6.0,
         aimToleranceDegrees: Double = 6.0,
-        initialFacingDegrees: Double? = nil
+        initialFacingDegrees: Double? = nil,
+        projectileKind: ProjectileKind = .bolt,
+        heatSeekingTurnRateDegreesPerSecond: Double = 240.0
     ) {
         self.id = id
         self.coordinate = coordinate
@@ -167,12 +185,19 @@ struct SentryBlueprint: Identifiable, Hashable {
         self.sweepSpeedDegreesPerSecond = sweepSpeedDegreesPerSecond
         self.fireCooldown = fireCooldown
         self.projectileSpeed = projectileSpeed
+        self.projectileSize = projectileSize
+        self.projectileLifetime = projectileLifetime
+        self.projectileBurstCount = projectileBurstCount
+        self.projectileSpreadDegrees = projectileSpreadDegrees
         self.aimToleranceDegrees = aimToleranceDegrees
         let halfArc = max(5.0, scanArcDegrees * 0.5)
         let defaultFacing = scanCenterDegrees - halfArc
         let desired = initialFacingDegrees ?? defaultFacing
         self.initialFacingDegrees = desired
+        self.projectileKind = projectileKind
+        self.heatSeekingTurnRateDegreesPerSecond = heatSeekingTurnRateDegreesPerSecond
         clampInitialFacing()
+        clampProjectileSettings()
     }
 
     mutating func clampInitialFacing() {
@@ -184,6 +209,15 @@ struct SentryBlueprint: Identifiable, Hashable {
         } else if initialFacingDegrees > maxAngle {
             initialFacingDegrees = maxAngle
         }
+    }
+
+    mutating func clampProjectileSettings() {
+        projectileSpeed = max(50.0, min(projectileSpeed, 2000.0))
+        projectileSize = max(0.05, min(projectileSize, 2.0))
+        projectileLifetime = max(0.1, min(projectileLifetime, 12.0))
+        projectileBurstCount = max(1, min(projectileBurstCount, 12))
+        projectileSpreadDegrees = max(0.0, min(projectileSpreadDegrees, 90.0))
+        heatSeekingTurnRateDegreesPerSecond = max(30.0, min(heatSeekingTurnRateDegreesPerSecond, 720.0))
     }
 }
 
@@ -335,6 +369,17 @@ struct LevelBlueprint {
         return sentry
     }
 
+    @discardableResult
+    mutating func addSentry(_ sentry: SentryBlueprint) -> SentryBlueprint? {
+        guard contains(sentry.coordinate) else { return nil }
+        guard self.sentry(at: sentry.coordinate) == nil else { return nil }
+        var copy = sentry
+        copy.clampInitialFacing()
+        copy.clampProjectileSettings()
+        sentries.append(copy)
+        return copy
+    }
+
     mutating func removeSentry(id: SentryBlueprint.ID) {
         sentries.removeAll { $0.id == id }
     }
@@ -343,6 +388,7 @@ struct LevelBlueprint {
         guard let index = sentries.firstIndex(where: { $0.id == id }) else { return }
         mutate(&sentries[index])
         sentries[index].clampInitialFacing()
+        sentries[index].clampProjectileSettings()
     }
 
     func sentry(id: SentryBlueprint.ID) -> SentryBlueprint? {
