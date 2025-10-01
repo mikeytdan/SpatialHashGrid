@@ -30,6 +30,9 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     private var isRunning = true
     private var platformStates: [PlatformRuntimeState] = []
     private var platformColliderMap: [MovingPlatformBlueprint.ID: ColliderID] = [:]
+    private var solidMask: [[Bool]] = []
+    private var sentryStates: [SentryRuntimeState] = []
+    private var projectileStates: [ProjectileRuntimeState] = []
 
     private struct PlatformRuntimeState {
         let blueprint: MovingPlatformBlueprint
@@ -43,6 +46,23 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         let distance: Double
         var progress: Double = 0
         var direction: Double = 1
+    }
+
+    private struct SentryRuntimeState {
+        let blueprint: SentryBlueprint
+        let position: Vec2
+        var angle: Double
+        var sweepDirection: Double
+        var cooldown: Double
+        var engaged: Bool
+    }
+
+    private struct ProjectileRuntimeState {
+        let id: UUID
+        var position: Vec2
+        var velocity: Vec2
+        var age: Double
+        var alive: Bool
     }
 
     init(blueprint: LevelBlueprint) {
@@ -59,6 +79,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
             guard blueprint.contains(point) else { continue }
             grid[point.row][point.column] = true
         }
+        solidMask = grid
 
         let builder = TileMapBuilder(world: world, tileSize: blueprint.tileSize)
         builder.build(solids: grid)
@@ -75,6 +96,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         player.groundFriction = 12.0
 
         buildMovingPlatforms()
+        buildSentries()
     }
 
     func start() {
@@ -110,6 +132,8 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         player.update(input: input, dt: dt)
         jumpQueued = false
         stepPlatforms(dt: dt)
+        updateSentries(dt: dt)
+        updateProjectiles(dt: dt)
     }
 
     func colliders() -> [Collider] {
@@ -167,7 +191,8 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
             let startCenter = startAABB.center
             let endCenter = endAABB.center
             let distance = (endCenter - startCenter).length
-            let state = PlatformRuntimeState(
+            let clampedProgress = max(0.0, min(platform.initialProgress, 1.0))
+            var state = PlatformRuntimeState(
                 blueprint: platform,
                 colliderID: colliderID,
                 startMin: startAABB.min,
@@ -177,9 +202,14 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
                 startCenter: startCenter,
                 endCenter: endCenter,
                 distance: distance,
-                progress: 0,
-                direction: 1
+                progress: clampedProgress,
+                direction: clampedProgress >= 1.0 ? -1 : 1
             )
+            if distance > 1e-5 && clampedProgress > 0 {
+                let newMin = lerp(state.startMin, state.endMin, t: clampedProgress)
+                let newMax = lerp(state.startMax, state.endMax, t: clampedProgress)
+                world.updateColliderAABB(id: colliderID, newAABB: AABB(min: newMin, max: newMax))
+            }
             platformStates.append(state)
             platformColliderMap[platform.id] = colliderID
         }
@@ -221,7 +251,235 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
             platformStates[index] = state
         }
     }
-    
+
+    private func buildSentries() {
+        sentryStates = blueprint.sentries.map { sentry in
+            let position = LevelPreviewRuntime.worldPosition(for: sentry.coordinate, tileSize: tileSize)
+            let halfArc = max(5.0, sentry.scanArcDegrees * 0.5)
+            let minAngleDeg = sentry.scanCenterDegrees - halfArc
+            let maxAngleDeg = sentry.scanCenterDegrees + halfArc
+            let clampedInitial = min(max(sentry.initialFacingDegrees, minAngleDeg), maxAngleDeg)
+            let startAngle = clampedInitial * .pi / 180.0
+            let sweepDirection: Double
+            if abs(clampedInitial - maxAngleDeg) < 0.001 {
+                sweepDirection = -1
+            } else {
+                sweepDirection = 1
+            }
+            return SentryRuntimeState(
+                blueprint: sentry,
+                position: position,
+                angle: startAngle,
+                sweepDirection: sweepDirection,
+                cooldown: 0,
+                engaged: false
+            )
+        }
+        projectileStates.removeAll(keepingCapacity: true)
+    }
+
+    struct SentrySnapshot: Identifiable {
+        let id: UUID
+        let position: Vec2
+        let angle: Double
+        let scanRange: Double
+        let arc: Double
+        let engaged: Bool
+    }
+
+    struct ProjectileSnapshot: Identifiable {
+        let id: UUID
+        let position: Vec2
+    }
+
+    func sentrySnapshots() -> [SentrySnapshot] {
+        sentryStates.map { state in
+            SentrySnapshot(
+                id: state.blueprint.id,
+                position: state.position,
+                angle: state.angle,
+                scanRange: state.blueprint.scanRange * tileSize,
+                arc: state.blueprint.scanArcDegrees * .pi / 180.0,
+                engaged: state.engaged
+            )
+        }
+    }
+
+    func projectileSnapshots() -> [ProjectileSnapshot] {
+        projectileStates.compactMap { projectile in
+            guard projectile.alive else { return nil }
+            return ProjectileSnapshot(id: projectile.id, position: projectile.position)
+        }
+    }
+
+    private func updateSentries(dt: Double) {
+        guard !sentryStates.isEmpty else { return }
+        let playerPosition = player.body.position
+        for index in sentryStates.indices {
+            var state = sentryStates[index]
+            let blueprint = state.blueprint
+            state.cooldown = max(0, state.cooldown - dt)
+
+            let halfArc = max(5.0, blueprint.scanArcDegrees * 0.5) * .pi / 180.0
+            let centerAngle = blueprint.scanCenterDegrees * .pi / 180.0
+            let minAngle = centerAngle - halfArc
+            let maxAngle = centerAngle + halfArc
+            let sweepSpeed = max(10.0, blueprint.sweepSpeedDegreesPerSecond) * .pi / 180.0
+
+            let toPlayer = playerPosition - state.position
+            let distance = toPlayer.length
+            let playerAngle = atan2(toPlayer.y, toPlayer.x)
+            let maxDistance = blueprint.scanRange * tileSize
+            let inRange = distance <= maxDistance
+            let diff = normalizedAngle(playerAngle - state.angle)
+            let maxTurn = sweepSpeed * dt * 2.0
+            let limitedTurn = min(max(diff, -maxTurn), maxTurn)
+            let projectedAngle = normalizedAngle(state.angle + limitedTurn)
+            let beamNow = abs(diff) <= halfArc
+            let beamProjected = abs(normalizedAngle(playerAngle - projectedAngle)) <= halfArc
+
+            var hasLineOfSightNow = false
+            if inRange && (beamNow || (state.engaged && beamProjected)) {
+                hasLineOfSightNow = hasLineOfSight(from: state.position, to: playerPosition, maxDistance: maxDistance)
+            }
+
+            let canAcquire = beamNow && hasLineOfSightNow
+            let canMaintain = (beamNow || beamProjected) && hasLineOfSightNow
+
+            if state.engaged {
+                if !canMaintain {
+                    state.engaged = false
+                }
+            } else if canAcquire {
+                state.engaged = true
+            }
+
+            if state.engaged {
+                state.angle = projectedAngle
+                state.sweepDirection = diff >= 0 ? 1 : -1
+                let tolerance = max(1.0, blueprint.aimToleranceDegrees) * .pi / 180.0
+                let aimDiff = normalizedAngle(playerAngle - state.angle)
+                if abs(aimDiff) <= tolerance && state.cooldown <= 0 && hasLineOfSightNow {
+                    fireProjectile(from: state.position, toward: playerPosition, speed: blueprint.projectileSpeed)
+                    state.cooldown = blueprint.fireCooldown
+                }
+            } else {
+                let sweepDelta = sweepSpeed * dt
+                if state.angle > maxAngle {
+                    state.sweepDirection = -1
+                    let delta = state.angle - maxAngle
+                    state.angle -= min(delta, sweepDelta)
+                } else if state.angle < minAngle {
+                    state.sweepDirection = 1
+                    let delta = minAngle - state.angle
+                    state.angle += min(delta, sweepDelta)
+                } else {
+                    state.angle += sweepDelta * state.sweepDirection
+                    if state.angle > maxAngle {
+                        state.angle = maxAngle
+                        state.sweepDirection = -1
+                    } else if state.angle < minAngle {
+                        state.angle = minAngle
+                        state.sweepDirection = 1
+                    }
+                }
+            }
+
+            sentryStates[index] = state
+        }
+    }
+
+    private func updateProjectiles(dt: Double) {
+        guard !projectileStates.isEmpty else { return }
+        let playerCenter = player.body.position
+        let playerRadius = tileSize * 0.4
+        let projectileRadius = tileSize * 0.18
+        for index in projectileStates.indices {
+            var projectile = projectileStates[index]
+            guard projectile.alive else { continue }
+            projectile.age += dt
+            if projectile.age > 5.0 {
+                projectile.alive = false
+                projectileStates[index] = projectile
+                continue
+            }
+            projectile.position += projectile.velocity * dt
+
+            if !withinWorld(projectile.position) || hitsSolid(at: projectile.position) {
+                projectile.alive = false
+            } else {
+                let delta = projectile.position - playerCenter
+                if delta.length <= (playerRadius + projectileRadius) {
+                    let impulse = projectile.velocity.normalized * 260.0
+                    player.body.velocity += impulse
+                    projectile.alive = false
+                }
+            }
+
+            projectileStates[index] = projectile
+        }
+
+        projectileStates.removeAll { !$0.alive }
+    }
+
+    private func fireProjectile(from origin: Vec2, toward target: Vec2, speed: Double) {
+        var direction = target - origin
+        if direction.length < 1e-3 {
+            direction = Vec2(1, 0)
+        }
+        direction = direction.normalized
+        let projectile = ProjectileRuntimeState(
+            id: UUID(),
+            position: origin,
+            velocity: direction * max(100.0, speed),
+            age: 0,
+            alive: true
+        )
+        projectileStates.append(projectile)
+    }
+
+    private func hasLineOfSight(from origin: Vec2, to target: Vec2, maxDistance: Double) -> Bool {
+        let delta = target - origin
+        let distance = delta.length
+        if distance > maxDistance { return false }
+        let steps = max(8, Int(distance / (tileSize * 0.25)))
+        guard steps > 0 else { return true }
+        let increment = delta / Double(steps)
+        var sample = origin
+        for _ in 0..<steps {
+            sample += increment
+            if hitsSolid(at: sample) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func hitsSolid(at position: Vec2) -> Bool {
+        guard let point = gridPoint(for: position) else { return true }
+        guard point.row >= 0, point.row < solidMask.count else { return true }
+        guard point.column >= 0, point.column < solidMask[point.row].count else { return true }
+        return solidMask[point.row][point.column]
+    }
+
+    private func gridPoint(for position: Vec2) -> GridPoint? {
+        let column = Int(position.x / tileSize)
+        let row = Int(position.y / tileSize)
+        guard row >= 0, row < blueprint.rows, column >= 0, column < blueprint.columns else { return nil }
+        return GridPoint(row: row, column: column)
+    }
+
+    private func withinWorld(_ position: Vec2) -> Bool {
+        position.x >= 0 && position.y >= 0 && position.x <= worldWidth && position.y <= worldHeight
+    }
+
+    private func normalizedAngle(_ angle: Double) -> Double {
+        var value = angle
+        while value > .pi { value -= 2 * .pi }
+        while value < -.pi { value += 2 * .pi }
+        return value
+    }
+
     private func aabbForPlatform(origin: GridPoint, size: GridSize) -> AABB {
         let min = Vec2(Double(origin.column) * tileSize, Double(origin.row) * tileSize)
         let max = Vec2(Double(origin.column + size.columns) * tileSize, Double(origin.row + size.rows) * tileSize)
@@ -232,14 +490,20 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
 @MainActor
 final class SpriteKitLevelPreviewScene: SKScene {
     private let runtime: LevelPreviewRuntime
+    private let input: InputController
+    private let onCommand: (GameCommand) -> Void
     private let worldNode = SKNode()
     private var staticTileNode: SKNode?
     private var playerNode = SKSpriteNode(color: .green, size: .zero)
     private var spawnNodes: [UUID: SKShapeNode] = [:]
     private var platformNodes: [UUID: SKSpriteNode] = [:]
+    private var sentryNodes: [UUID: SentryNode] = [:]
+    private var projectileNodes: [UUID: SKShapeNode] = [:]
 
-    init(runtime: LevelPreviewRuntime) {
+    init(runtime: LevelPreviewRuntime, input: InputController, onCommand: @escaping (GameCommand) -> Void) {
         self.runtime = runtime
+        self.input = input
+        self.onCommand = onCommand
         let size = CGSize(width: runtime.worldWidth, height: runtime.worldHeight)
         super.init(size: size)
         scaleMode = .aspectFit
@@ -258,13 +522,29 @@ final class SpriteKitLevelPreviewScene: SKScene {
         rebuildStaticGeometry()
         rebuildSpawnMarkers()
         rebuildPlatformNodes()
+        rebuildSentryNodes()
         ensurePlayerNode()
     }
 
     override func update(_ currentTime: TimeInterval) {
+        // 1) Poll input (safe; not inside SwiftUI view update)
+        let s = input.sample()
+
+        // 2) Continuous: movement axis from held state
+        runtime.moveAxis = s.axisX
+
+        // 3) Edge: jump / undo / redo / stop
+        if s.jumpPressedEdge { runtime.queueJump() }
+        if !s.pressed.isEmpty {
+            onCommand(s.pressed)
+        }
+
+        // 4) Advance simulation & sync nodes
         runtime.step()
         syncPlayerNode()
         syncPlatformNodes()
+        syncSentryNodes()
+        syncProjectileNodes()
     }
 
     private func rebuildStaticGeometry() {
@@ -332,6 +612,13 @@ final class SpriteKitLevelPreviewScene: SKScene {
         syncPlatformNodes()
     }
 
+    private func rebuildSentryNodes() {
+        for (_, node) in sentryNodes { node.removeFromParent() }
+        sentryNodes.removeAll()
+        syncSentryNodes()
+        syncProjectileNodes()
+    }
+
     private func syncPlatformNodes() {
         var seen: Set<UUID> = []
         for (index, platform) in runtime.blueprint.movingPlatforms.enumerated() {
@@ -350,10 +637,65 @@ final class SpriteKitLevelPreviewScene: SKScene {
         }
     }
 
+    private func syncSentryNodes() {
+        var seen: Set<UUID> = []
+        for snapshot in runtime.sentrySnapshots() {
+            let node = sentryNodes[snapshot.id] ?? {
+                let newNode = SentryNode()
+                newNode.zPosition = 2.2
+                worldNode.addChild(newNode)
+                sentryNodes[snapshot.id] = newNode
+                return newNode
+            }()
+
+            node.position = convertToSpriteKitPoint(snapshot.position)
+            let color = sentryColor(for: snapshot.id)
+            node.update(
+                color: color,
+                range: CGFloat(snapshot.scanRange),
+                angle: -CGFloat(snapshot.angle),
+                arc: CGFloat(snapshot.arc),
+                engaged: snapshot.engaged
+            )
+            seen.insert(snapshot.id)
+        }
+
+        for (id, node) in sentryNodes where !seen.contains(id) {
+            node.removeFromParent()
+            sentryNodes.removeValue(forKey: id)
+        }
+    }
+
+    private func syncProjectileNodes() {
+        var seen: Set<UUID> = []
+        for snapshot in runtime.projectileSnapshots() {
+            let node = projectileNodes[snapshot.id] ?? makeProjectileNode()
+            projectileNodes[snapshot.id] = node
+            node.position = convertToSpriteKitPoint(snapshot.position)
+            seen.insert(snapshot.id)
+        }
+
+        for (id, node) in projectileNodes where !seen.contains(id) {
+            node.removeFromParent()
+            projectileNodes.removeValue(forKey: id)
+        }
+    }
+
     private func makePlatformNode(colorIndex: Int) -> SKSpriteNode {
         let node = SKSpriteNode(color: platformColor(for: colorIndex), size: .zero)
         node.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         node.zPosition = 1.5
+        worldNode.addChild(node)
+        return node
+    }
+
+    private func makeProjectileNode() -> SKShapeNode {
+        let radius = CGFloat(runtime.tileSize * 0.18)
+        let node = SKShapeNode(circleOfRadius: radius)
+        node.fillColor = .white
+        node.strokeColor = .clear
+        node.glowWidth = radius * 0.6
+        node.zPosition = 2.4
         worldNode.addChild(node)
         return node
     }
@@ -405,6 +747,17 @@ final class SpriteKitLevelPreviewScene: SKScene {
         #endif
     }
 
+    private func sentryColor(for id: UUID) -> SKColor {
+        let index = runtime.blueprint.sentries.firstIndex(where: { $0.id == id }) ?? 0
+        #if canImport(UIKit)
+        return SentryPalette.uiColor(for: index)
+        #elseif canImport(AppKit) && !targetEnvironment(macCatalyst)
+        return SentryPalette.nsColor(for: index)
+        #else
+        return SKColor.systemRed
+        #endif
+    }
+
     private func rectForGridPoint(_ point: GridPoint) -> CGRect {
         let x = CGFloat(Double(point.column) * runtime.tileSize)
         let y = CGFloat(runtime.worldHeight - Double(point.row + 1) * runtime.tileSize)
@@ -431,8 +784,64 @@ private extension SIMD2 where Scalar == Double {
     var length: Double { sqrt(x * x + y * y) }
 
     var normalized: SIMD2<Double> {
-        let len = max(length, 0.000_001)
+        let len = Swift.max(length, 0.000_001)
         return self / len
+    }
+}
+
+private final class SentryNode: SKNode {
+    private let baseNode: SKShapeNode
+    private let beamNode: SKShapeNode
+    private let guideNode: SKShapeNode
+
+    override init() {
+        let radius: CGFloat = 12
+        baseNode = SKShapeNode(circleOfRadius: radius)
+        baseNode.lineWidth = 2
+        baseNode.zPosition = 0.2
+
+        beamNode = SKShapeNode()
+        beamNode.lineWidth = 0
+        beamNode.zPosition = 0
+
+        guideNode = SKShapeNode()
+        guideNode.lineWidth = 2
+        guideNode.zPosition = 0.3
+
+        super.init()
+        addChild(beamNode)
+        addChild(baseNode)
+        addChild(guideNode)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(color: SKColor, range: CGFloat, angle: CGFloat, arc: CGFloat, engaged: Bool) {
+        baseNode.fillColor = engaged ? color : color.withAlphaComponent(0.8)
+        baseNode.strokeColor = engaged ? .white : color.withAlphaComponent(0.9)
+
+        let startAngle = angle - arc * 0.5
+        let endAngle = angle + arc * 0.5
+        let segments = max(12, Int(abs(arc) * 90 / .pi))
+        let path = CGMutablePath()
+        path.move(to: .zero)
+        for i in 0...segments {
+            let t = CGFloat(i) / CGFloat(segments)
+            let theta = startAngle + (endAngle - startAngle) * t
+            let point = CGPoint(x: cos(theta) * range, y: sin(theta) * range)
+            path.addLine(to: point)
+        }
+        path.closeSubpath()
+        beamNode.path = path
+        beamNode.fillColor = color.withAlphaComponent(engaged ? 0.35 : 0.20)
+
+        let guidePath = CGMutablePath()
+        guidePath.move(to: .zero)
+        guidePath.addLine(to: CGPoint(x: cos(angle) * range, y: sin(angle) * range))
+        guideNode.path = guidePath
+        guideNode.strokeColor = engaged ? .white : color.withAlphaComponent(0.75)
     }
 }
 
@@ -442,9 +851,15 @@ struct SpriteKitLevelPreviewView: View {
     @State private var showDebugHUD = true
     @State private var debugSnapshot: LevelPreviewRuntime.PlayerDebugSnapshot?
     private let onStop: () -> Void
+    @State private var key: String = ""
+    
+    let input: InputController
+    
+    @FocusState private var focused: Bool
 
-    init(blueprint: LevelBlueprint, onStop: @escaping () -> Void) {
+    init(blueprint: LevelBlueprint, input: InputController, onStop: @escaping () -> Void) {
         _runtime = StateObject(wrappedValue: LevelPreviewRuntime(blueprint: blueprint))
+        self.input = input
         self.onStop = onStop
     }
 
@@ -476,30 +891,57 @@ struct SpriteKitLevelPreviewView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding([.top, .trailing], 16)
             }
+            .focusable()
+            .focused($focused)
+            .onAppear {
+                focused = true
+            }
+            .onKeyPress(phases: [.down, .up]) { keypress in
+                switch keypress.phase {
+                case .down:
+                    input.handleKeyDown(keypress)
+                    return previewHandles(keypress) ? .handled : .ignored
+                case .up:
+                    input.handleKeyUp(keypress)
+                    return previewHandles(keypress) ? .handled : .ignored
+                default:
+                    return .ignored
+                }
+            }
             .onAppear(perform: startScene)
             .onDisappear { runtime.stop() }
-        }
-        .onReceive(runtime.$frameTick) { tick in
-            guard showDebugHUD else {
-                debugSnapshot = nil
-                return
+            .onReceive(runtime.$frameTick) { tick in
+                guard showDebugHUD else {
+                    debugSnapshot = nil
+                    return
+                }
+                if tick % 3 == 0 {
+                    debugSnapshot = runtime.playerDebug()
+                }
             }
-            if tick % 3 == 0 {
-                debugSnapshot = runtime.playerDebug()
-            }
-        }
-        .onChange(of: showDebugHUD) { value in
-            if value {
-                debugSnapshot = runtime.playerDebug()
-            } else {
-                debugSnapshot = nil
+            .onChange(of: showDebugHUD) { value in
+                if value {
+                    debugSnapshot = runtime.playerDebug()
+                } else {
+                    debugSnapshot = nil
+                }
             }
         }
     }
 
     private func startScene() {
         if scene == nil {
-            let skScene = SpriteKitLevelPreviewScene(runtime: runtime)
+            let skScene = SpriteKitLevelPreviewScene(
+                runtime: runtime,
+                input: input,
+                onCommand: { cmd in
+                    // Edge-triggered commands handled here (undo/redo/stop)
+                    if cmd.contains(.stop) {
+                        runtime.stop()
+                        onStop()
+                    }
+                }
+            )
             scene = skScene
         }
         runtime.start()
@@ -510,7 +952,12 @@ struct SpriteKitLevelPreviewView: View {
 
     private var instructionOverlay: some View {
         VStack(alignment: .leading, spacing: 4) {
+            Text("Use ⬅️➡️ or A/D to move, ⬆️/W/Space to jump, Esc to stop preview")
+                .font(.caption.bold())
+                .foregroundStyle(.white)
             Text("Drag left half to move, tap right to jump")
+            Text("Cmd-Z to undo, Shift-Cmd-Z or Cmd-Y to redo")
+            Text("Sentries sweep their arc and fire when they see you—tune them in the editor.")
             Text("Previewing \(runtime.blueprint.spawnPoints.count) spawn(s) on SpriteKit runtime")
         }
         .font(.caption)
@@ -591,12 +1038,26 @@ struct SpriteKitLevelPreviewView: View {
         }
         .accessibilityLabel(showDebugHUD ? "Hide Debug Info" : "Show Debug Info")
     }
+
+    private func previewHandles(_ keyPress: KeyPress) -> Bool {
+        if keyPress.key == .escape { return true }
+
+        switch keyPress.key {
+        case .leftArrow, .rightArrow, .upArrow:
+            return true
+        default:
+            break
+        }
+
+        let normalized = keyPress.characters.lowercased()
+        return normalized.contains("a") || normalized.contains("d") || normalized.contains("w") || normalized.contains(" ")
+    }
 }
 
 struct SpriteKitLevelPreviewAdapter: LevelRuntimeAdapter {
     static let engineName = "SpriteKit"
 
-    func makePreview(for blueprint: LevelBlueprint, onStop: @escaping () -> Void) -> SpriteKitLevelPreviewView {
-        SpriteKitLevelPreviewView(blueprint: blueprint, onStop: onStop)
+    func makePreview(for blueprint: LevelBlueprint, input: InputController, onStop: @escaping () -> Void) -> SpriteKitLevelPreviewView {
+        SpriteKitLevelPreviewView(blueprint: blueprint, input: input, onStop: onStop)
     }
 }

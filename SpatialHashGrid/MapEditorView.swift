@@ -14,6 +14,7 @@ final class MapEditorViewModel: ObservableObject {
         case circle
         case spawn
         case platform
+        case sentry
 
         var id: Tool { self }
 
@@ -27,6 +28,7 @@ final class MapEditorViewModel: ObservableObject {
             case .circle: return "Circle"
             case .spawn: return "Spawn"
             case .platform: return "Platform"
+            case .sentry: return "Sentry"
             }
         }
 
@@ -40,6 +42,7 @@ final class MapEditorViewModel: ObservableObject {
             case .circle: return "circle.dotted"
             case .spawn: return "figure.walk"
             case .platform: return "rectangle.3.group"
+            case .sentry: return "dot.radiowaves.right"
             }
         }
     }
@@ -65,6 +68,7 @@ final class MapEditorViewModel: ObservableObject {
     @Published var levelName: String = "Untitled"
     @Published var selectedSpawnID: PlayerSpawnPoint.ID?
     @Published var selectedPlatformID: MovingPlatformBlueprint.ID?
+    @Published var selectedSentryID: SentryBlueprint.ID?
     @Published var hoveredPoint: GridPoint?
     @Published var shapePreview: Set<GridPoint> = []
     @Published var zoom: Double = 1.0
@@ -75,6 +79,7 @@ final class MapEditorViewModel: ObservableObject {
     private var undoStack: [LevelBlueprint] = []
     private var redoStack: [LevelBlueprint] = []
     private var platformDragContext: PlatformDragContext?
+    private var sentryDragID: SentryBlueprint.ID?
 
     private struct PlatformMoveContext {
         let platformID: MovingPlatformBlueprint.ID
@@ -114,6 +119,11 @@ final class MapEditorViewModel: ObservableObject {
         return blueprint.movingPlatform(id: id)
     }
 
+    var selectedSentry: SentryBlueprint? {
+        guard let id = selectedSentryID else { return nil }
+        return blueprint.sentry(id: id)
+    }
+
     var tilePalette: [LevelTileKind] { LevelTileKind.palette }
 
     var paintTileKind: LevelTileKind {
@@ -137,7 +147,9 @@ final class MapEditorViewModel: ObservableObject {
         dragStartPoint = nil
         syncSelectedSpawn()
         syncSelectedPlatform()
+        syncSelectedSentry()
         platformDragContext = nil
+        sentryDragID = nil
     }
 
     func fillGround() {
@@ -189,6 +201,128 @@ final class MapEditorViewModel: ObservableObject {
         syncSelectedSpawn()
     }
 
+    func sentryColor(for index: Int) -> Color {
+        SentryPalette.color(for: index)
+    }
+
+    func selectSentry(_ sentry: SentryBlueprint) {
+        selectedSentryID = sentry.id
+        tool = .sentry
+    }
+
+    func removeSelectedSentry() {
+        guard let sentry = selectedSentry else { return }
+        removeSentry(sentry)
+    }
+
+    func removeSentry(_ sentry: SentryBlueprint) {
+        captureSnapshot()
+        blueprint.removeSentry(id: sentry.id)
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryRange(_ range: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(1.0, min(range, 32.0))
+        guard abs(sentry.scanRange - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.scanRange = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryCenter(_ degrees: Double) {
+        guard let sentry = selectedSentry else { return }
+        let normalized = max(-180.0, min(degrees, 180.0))
+        guard abs(sentry.scanCenterDegrees - normalized) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.scanCenterDegrees = normalized
+            ref.initialFacingDegrees = clampSentryInitialAngle(
+                center: normalized,
+                arc: ref.scanArcDegrees,
+                desired: ref.initialFacingDegrees
+            )
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryArc(_ degrees: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(10.0, min(degrees, 240.0))
+        guard abs(sentry.scanArcDegrees - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.scanArcDegrees = clamped
+            ref.initialFacingDegrees = clampSentryInitialAngle(
+                center: ref.scanCenterDegrees,
+                arc: clamped,
+                desired: ref.initialFacingDegrees
+            )
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryInitialAngle(_ degrees: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = clampSentryInitialAngle(
+            center: sentry.scanCenterDegrees,
+            arc: sentry.scanArcDegrees,
+            desired: degrees
+        )
+        guard abs(sentry.initialFacingDegrees - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.initialFacingDegrees = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentrySweepSpeed(_ degreesPerSecond: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(10.0, min(degreesPerSecond, 360.0))
+        guard abs(sentry.sweepSpeedDegreesPerSecond - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.sweepSpeedDegreesPerSecond = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryCooldown(_ cooldown: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(0.2, min(cooldown, 5.0))
+        guard abs(sentry.fireCooldown - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.fireCooldown = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryProjectileSpeed(_ speed: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(200.0, min(speed, 1500.0))
+        guard abs(sentry.projectileSpeed - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.projectileSpeed = clamped
+        }
+        syncSelectedSentry()
+    }
+
+    func updateSelectedSentryAimTolerance(_ degrees: Double) {
+        guard let sentry = selectedSentry else { return }
+        let clamped = max(2.0, min(degrees, 45.0))
+        guard abs(sentry.aimToleranceDegrees - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateSentry(id: sentry.id) { ref in
+            ref.aimToleranceDegrees = clamped
+        }
+        syncSelectedSentry()
+    }
+
     func removePlatform(_ platform: MovingPlatformBlueprint) {
         captureSnapshot()
         blueprint.removeMovingPlatform(id: platform.id)
@@ -216,6 +350,17 @@ final class MapEditorViewModel: ObservableObject {
         captureSnapshot()
         blueprint.updateMovingPlatform(id: platform.id) { ref in
             ref.speed = clamped
+        }
+        syncSelectedPlatform()
+    }
+
+    func updateSelectedPlatformInitialProgress(_ progress: Double) {
+        guard let platform = selectedPlatform else { return }
+        let clamped = max(0.0, min(progress, 1.0))
+        guard abs(platform.initialProgress - clamped) > 0.0001 else { return }
+        captureSnapshot()
+        blueprint.updateMovingPlatform(id: platform.id) { ref in
+            ref.initialProgress = clamped
         }
         syncSelectedPlatform()
     }
@@ -250,6 +395,18 @@ final class MapEditorViewModel: ObservableObject {
             platformDragContext = nil
         }
 
+        if tool == .sentry {
+            if let existing = sentry(at: point) {
+                selectedSentryID = existing.id
+                sentryDragID = existing.id
+            } else if let newSentry = insertSentry(at: point) {
+                selectedSentryID = newSentry.id
+                sentryDragID = newSentry.id
+            }
+        } else {
+            sentryDragID = nil
+        }
+
         applyDrag(at: point, isInitial: true)
     }
 
@@ -266,6 +423,8 @@ final class MapEditorViewModel: ObservableObject {
             hoveredPoint = nil
             syncSelectedSpawn()
             syncSelectedPlatform()
+            syncSelectedSentry()
+            sentryDragID = nil
         }
 
         guard let point else { return }
@@ -287,27 +446,35 @@ final class MapEditorViewModel: ObservableObject {
             if case .create = currentPlatformContext ?? .create {
                 finalizePlatform(from: start, to: point)
             }
+        case .sentry:
+            break
         default:
             break
         }
 
         platformDragContext = nil
     }
-
+    
     func undo() {
-        guard let previous = undoStack.popLast() else { return }
-        redoStack.append(blueprint)
-        blueprint = previous
-        syncSelectedSpawn()
-        syncSelectedPlatform()
+        scheduleMutation { model in
+            guard let previous = model.undoStack.popLast() else { return }
+            model.redoStack.append(model.blueprint)
+            model.blueprint = previous
+            model.syncSelectedSpawn()
+            model.syncSelectedPlatform()
+            model.syncSelectedSentry()
+        }
     }
 
     func redo() {
-        guard let next = redoStack.popLast() else { return }
-        undoStack.append(blueprint)
-        blueprint = next
-        syncSelectedSpawn()
-        syncSelectedPlatform()
+        scheduleMutation { model in
+            guard let next = model.redoStack.popLast() else { return }
+            model.undoStack.append(model.blueprint)
+            model.blueprint = next
+            model.syncSelectedSpawn()
+            model.syncSelectedPlatform()
+            model.syncSelectedSentry()
+        }
     }
 
     func spawnColor(for index: Int) -> Color {
@@ -341,6 +508,8 @@ final class MapEditorViewModel: ObservableObject {
             default:
                 shapePreview = pointsForRectangle(from: dragStartPoint ?? point, to: point, mode: .fill)
             }
+        case .sentry:
+            moveSentry(to: point, isInitial: isInitial)
         }
     }
 
@@ -361,6 +530,20 @@ final class MapEditorViewModel: ObservableObject {
             blueprint.updateSpawn(id: id, to: point)
         } else if isInitial, let newSpawn = insertSpawn(at: point) {
             selectedSpawnID = newSpawn.id
+        }
+    }
+
+    private func moveSentry(to point: GridPoint, isInitial: Bool) {
+        guard blueprint.contains(point) else { return }
+        if let dragID = sentryDragID, blueprint.sentry(id: dragID) != nil {
+            blueprint.updateSentry(id: dragID) { ref in
+                ref.coordinate = point
+            }
+        } else if isInitial {
+            if let newSentry = insertSentry(at: point) {
+                selectedSentryID = newSentry.id
+                sentryDragID = newSentry.id
+            }
         }
     }
 
@@ -403,14 +586,14 @@ final class MapEditorViewModel: ObservableObject {
         let maxRow = blueprint.rows - context.size.rows
         let maxCol = blueprint.columns - context.size.columns
 
-        var newOriginRow = min(max(context.startOrigin.row + deltaRow, 0), maxRow)
-        var newOriginCol = min(max(context.startOrigin.column + deltaCol, 0), maxCol)
+        let newOriginRow = min(max(context.startOrigin.row + deltaRow, 0), maxRow)
+        let newOriginCol = min(max(context.startOrigin.column + deltaCol, 0), maxCol)
 
         deltaRow = newOriginRow - context.startOrigin.row
         deltaCol = newOriginCol - context.startOrigin.column
 
-        var newTargetRow = min(max(context.startTarget.row + deltaRow, 0), maxRow)
-        var newTargetCol = min(max(context.startTarget.column + deltaCol, 0), maxCol)
+        let newTargetRow = min(max(context.startTarget.row + deltaRow, 0), maxRow)
+        let newTargetCol = min(max(context.startTarget.column + deltaCol, 0), maxCol)
 
         let newOrigin = GridPoint(row: newOriginRow, column: newOriginCol)
         let newTarget = GridPoint(row: newTargetRow, column: newTargetCol)
@@ -558,6 +741,13 @@ final class MapEditorViewModel: ObservableObject {
         return platform
     }
 
+    @discardableResult
+    private func insertSentry(at point: GridPoint) -> SentryBlueprint? {
+        guard let sentry = blueprint.addSentry(at: point) else { return nil }
+        syncSelectedSentry()
+        return sentry
+    }
+
     func platformTargetRowRange(_ platform: MovingPlatformBlueprint) -> ClosedRange<Int> {
         let maxRow = max(0, blueprint.rows - platform.size.rows)
         return 0...maxRow
@@ -566,6 +756,15 @@ final class MapEditorViewModel: ObservableObject {
     func platformTargetColumnRange(_ platform: MovingPlatformBlueprint) -> ClosedRange<Int> {
         let maxCol = max(0, blueprint.columns - platform.size.columns)
         return 0...maxCol
+    }
+
+    func sentryInitialAngleRange(_ sentry: SentryBlueprint) -> ClosedRange<Double> {
+        let range = sentryAngleRange(center: sentry.scanCenterDegrees, arc: sentry.scanArcDegrees)
+        return range.lowerBound...range.upperBound
+    }
+
+    func sentry(at point: GridPoint) -> SentryBlueprint? {
+        blueprint.sentry(at: point)
     }
 
     private func clampTargetRow(_ row: Int, for platform: MovingPlatformBlueprint) -> Int {
@@ -578,11 +777,35 @@ final class MapEditorViewModel: ObservableObject {
         return min(max(column, range.lowerBound), range.upperBound)
     }
 
+    private func sentryAngleRange(center: Double, arc: Double) -> (lowerBound: Double, upperBound: Double) {
+        let halfArc = max(5.0, min(arc, 240.0) * 0.5)
+        return (center - halfArc, center + halfArc)
+    }
+
+    private func clampSentryInitialAngle(center: Double, arc: Double, desired: Double) -> Double {
+        let range = sentryAngleRange(center: center, arc: arc)
+        return min(max(desired, range.lowerBound), range.upperBound)
+    }
+
     private func syncSelectedPlatform() {
         if let id = selectedPlatformID, blueprint.movingPlatform(id: id) != nil {
             return
         }
         selectedPlatformID = blueprint.movingPlatforms.first?.id
+    }
+
+    private func syncSelectedSentry() {
+        if let id = selectedSentryID, blueprint.sentry(id: id) != nil {
+            return
+        }
+        selectedSentryID = blueprint.sentries.first?.id
+    }
+
+    private func scheduleMutation(_ mutation: @escaping (MapEditorViewModel) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            mutation(self)
+        }
     }
 }
 
@@ -590,6 +813,8 @@ struct MapEditorView: View {
     @StateObject private var viewModel = MapEditorViewModel()
     @State private var isPreviewing = false
     @State private var spawnNameDraft: String = ""
+    @State private var input = InputController()
+    @FocusState private var focused: Bool
 
     private let adapter = SpriteKitLevelPreviewAdapter()
 
@@ -619,27 +844,46 @@ struct MapEditorView: View {
                 .padding(20)
         }
         .sheet(isPresented: $isPreviewing) {
-            adapter.makePreview(for: viewModel.blueprint) {
+            adapter.makePreview(for: viewModel.blueprint, input: input) {
                 isPreviewing = false
+                focusEditor()
             }
             .ignoresSafeArea()
         }
-        .onChange(of: viewModel.selectedSpawnID) { _ in
+        .onChange(of: viewModel.selectedSpawnID) {
             spawnNameDraft = viewModel.selectedSpawn?.name ?? ""
         }
-        .onChange(of: viewModel.blueprint.spawnPoints) { _ in
+        .onChange(of: viewModel.blueprint.spawnPoints) {
             spawnNameDraft = viewModel.selectedSpawn?.name ?? ""
         }
-        .onChange(of: viewModel.blueprint.movingPlatforms) { _ in
-            guard !viewModel.blueprint.movingPlatforms.isEmpty else {
-                viewModel.selectedPlatformID = nil
-                return
+        .focusable()
+        .focused($focused)
+        .onAppear {
+            focusEditor()
+        }
+        .onChange(of: isPreviewing) { _, previewing in
+            DispatchQueue.main.async {
+                if previewing {
+                    input.reset()
+                } else {
+                    focusEditor()
+                }
             }
-            if let selectedID = viewModel.selectedPlatformID,
-               viewModel.blueprint.movingPlatforms.contains(where: { $0.id == selectedID }) {
-                return
+        }
+        .onKeyPress(phases: [.down, .up]) { kp in
+            switch kp.phase {
+            case .down:
+                input.handleKeyDown(kp)
+                if handleEditorCommand(for: kp) { return .handled }
+                if !isPreviewing { input.drainPressedCommands() }
+                return isHandledKey(kp) ? .handled : .ignored
+            case .up:
+                input.handleKeyUp(kp)
+                if !isPreviewing { input.drainPressedCommands() }
+                return isHandledKey(kp) ? .handled : .ignored
+            default:
+                return .ignored
             }
-            viewModel.selectedPlatformID = viewModel.blueprint.movingPlatforms.first?.id
         }
     }
 
@@ -651,12 +895,14 @@ struct MapEditorView: View {
             zoom: viewModel.zoom,
             selectedSpawnID: viewModel.selectedSpawnID,
             selectedPlatformID: viewModel.selectedPlatformID,
+            selectedSentryID: viewModel.selectedSentryID,
             previewColor: viewModel.paintTileKind.fillColor,
             hoveredPoint: viewModel.hoveredPoint,
             onHover: viewModel.updateHover,
             onDragBegan: viewModel.handleDragBegan,
             onDragChanged: viewModel.handleDragChanged,
-            onDragEnded: viewModel.handleDragEnded
+            onDragEnded: viewModel.handleDragEnded,
+            onFocusRequested: focusEditorIfNeeded
         )
     }
 
@@ -667,6 +913,7 @@ struct MapEditorView: View {
             toolsSection
             drawModeSection
             canvasControls
+            sentrySection
             platformSection
             spawnSection
             quickActions
@@ -795,6 +1042,170 @@ struct MapEditorView: View {
         }
     }
 
+    private var sentrySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Sentries")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    viewModel.tool = .sentry
+                } label: {
+                    Label("Sentry Tool", systemImage: "dot.radiowaves.right")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            let sentries = viewModel.blueprint.sentries
+            if sentries.isEmpty {
+                Text("Use the Sentry tool to place automated turrets that sweep for players.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                let columns = Array(repeating: GridItem(.flexible(minimum: 32, maximum: 50), spacing: 8), count: 4)
+                LazyVGrid(columns: columns, spacing: 8) {
+                    ForEach(Array(sentries.enumerated()), id: \.element.id) { index, sentry in
+                        Button {
+                            viewModel.selectSentry(sentry)
+                        } label: {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(viewModel.sentryColor(for: index).opacity(0.75))
+                                .frame(width: 44, height: 44)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .stroke(viewModel.selectedSentryID == sentry.id ? Color.white : Color.clear, lineWidth: 2)
+                                )
+                                .overlay(
+                                    Text("\(index + 1)")
+                                        .font(.caption2.bold())
+                                        .foregroundStyle(.white)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if let sentry = viewModel.selectedSentry {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Selected Sentry")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Text("Coordinate: r\(sentry.coordinate.row) c\(sentry.coordinate.column)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    let rangeBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.scanRange ?? sentry.scanRange },
+                        set: { viewModel.updateSelectedSentryRange($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: rangeBinding, in: 1.0...32.0, step: 0.5)
+                        Text(String(format: "Scan Range: %.1f tiles", rangeBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let centerBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.scanCenterDegrees ?? sentry.scanCenterDegrees },
+                        set: { viewModel.updateSelectedSentryCenter($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: centerBinding, in: -180...180, step: 1)
+                        Text(String(format: "Scan Center: %.0f°", centerBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let arcBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.scanArcDegrees ?? sentry.scanArcDegrees },
+                        set: { viewModel.updateSelectedSentryArc($0) }
+                    )
+                    let angleRange = viewModel.sentryInitialAngleRange(sentry)
+                    let initialAngleBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.initialFacingDegrees ?? sentry.initialFacingDegrees },
+                        set: { viewModel.updateSelectedSentryInitialAngle($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: arcBinding, in: 10...240, step: 1)
+                        Text(String(format: "Sweep Arc: %.0f°", arcBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: initialAngleBinding, in: angleRange, step: 1)
+                        Text(String(format: "Initial Angle: %.0f°", initialAngleBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let sweepBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.sweepSpeedDegreesPerSecond ?? sentry.sweepSpeedDegreesPerSecond },
+                        set: { viewModel.updateSelectedSentrySweepSpeed($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: sweepBinding, in: 10...360, step: 5)
+                        Text(String(format: "Sweep Speed: %.0f°/s", sweepBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let projectileBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.projectileSpeed ?? sentry.projectileSpeed },
+                        set: { viewModel.updateSelectedSentryProjectileSpeed($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: projectileBinding, in: 200...1500, step: 50)
+                        Text(String(format: "Projectile Speed: %.0f", projectileBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    let cooldownBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.fireCooldown ?? sentry.fireCooldown },
+                        set: { viewModel.updateSelectedSentryCooldown($0) }
+                    )
+                    Stepper(value: cooldownBinding, in: 0.2...5.0, step: 0.1) {
+                        Text(String(format: "Cooldown: %.1fs", cooldownBinding.wrappedValue))
+                    }
+
+                    let toleranceBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.aimToleranceDegrees ?? sentry.aimToleranceDegrees },
+                        set: { viewModel.updateSelectedSentryAimTolerance($0) }
+                    )
+                    Stepper(value: toleranceBinding, in: 2...45, step: 1) {
+                        Text(String(format: "Aim Tolerance: %.0f°", toleranceBinding.wrappedValue))
+                    }
+
+                    Button(role: .destructive) {
+                        viewModel.removeSentry(sentry)
+                    } label: {
+                        Label("Remove Sentry", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+    
+    private func isHandledKey(_ kp: KeyPress) -> Bool {
+        // Any key we map in InputController should return handled.
+        // This avoids arrow keys accidentally scrolling a parent scroll view.
+        switch kp.key {
+        case .leftArrow, .rightArrow, .upArrow, .escape:
+            return true
+        default:
+            break
+        }
+        let ch = kp.characters.lowercased()
+        if ch == "a" || ch == "d" || ch == "w" || ch == " " { return true }
+        if kp.modifiers.contains(.command), (ch == "z" || ch == "y" || ch == "r") { return true }
+        return false
+    }
+
     private var platformSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -852,11 +1263,11 @@ struct MapEditorView: View {
                         .foregroundStyle(.secondary)
 
                     let rowBinding = Binding<Int>(
-                        get: { platform.target.row },
+                        get: { viewModel.selectedPlatform?.target.row ?? platform.target.row },
                         set: { viewModel.updateSelectedPlatformTarget(row: $0) }
                     )
                     let colBinding = Binding<Int>(
-                        get: { platform.target.column },
+                        get: { viewModel.selectedPlatform?.target.column ?? platform.target.column },
                         set: { viewModel.updateSelectedPlatformTarget(column: $0) }
                     )
 
@@ -876,6 +1287,17 @@ struct MapEditorView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Slider(value: speedBinding, in: 0.1...5.0, step: 0.1)
                         Text(String(format: "Speed: %.1f tiles/s", speedBinding.wrappedValue))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let progressBinding = Binding<Double>(
+                        get: { viewModel.selectedPlatform?.initialProgress ?? platform.initialProgress },
+                        set: { viewModel.updateSelectedPlatformInitialProgress($0) }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Slider(value: progressBinding, in: 0...1, step: 0.01)
+                        Text(String(format: "Start Position: %.0f%%", progressBinding.wrappedValue * 100))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -979,6 +1401,57 @@ struct MapEditorView: View {
         viewModel.addSpawnAtCenter()
     }
 
+    private func focusEditor() {
+        focused = true
+    }
+
+    private func focusEditorIfNeeded() {
+        if !focused {
+            focusEditor()
+        }
+    }
+
+    private func handleEditorCommand(for keyPress: KeyPress) -> Bool {
+        let normalized = keyPress.characters.lowercased()
+        let hasCommand = keyPress.modifiers.contains(.command)
+        let hasShift = keyPress.modifiers.contains(.shift)
+
+        var action: (() -> Void)?
+
+        if keyPress.key == .escape {
+            action = {
+                if isPreviewing {
+                    isPreviewing = false
+                }
+                focusEditor()
+            }
+        } else if hasCommand {
+            if normalized.contains("z") {
+                action = {
+                    if hasShift {
+                        if viewModel.canRedo { viewModel.redo() }
+                    } else {
+                        if viewModel.canUndo { viewModel.undo() }
+                    }
+                }
+            } else if normalized.contains("y") {
+                action = {
+                    if viewModel.canRedo { viewModel.redo() }
+                }
+            } else if normalized.contains("r") {
+                action = openPreviewIfPossible
+            }
+        }
+
+        guard let action else { return false }
+
+        DispatchQueue.main.async {
+            action()
+        }
+
+        return true
+    }
+
     private var floatingControls: some View {
         HStack(spacing: 12) {
             Button(action: viewModel.toggleGrid) {
@@ -989,7 +1462,7 @@ struct MapEditorView: View {
             .buttonStyle(.plain)
             .accessibilityLabel(viewModel.showGrid ? "Hide Grid" : "Show Grid")
 
-            Button(action: { isPreviewing = true }) {
+            Button(action: openPreviewIfPossible) {
                 Image(systemName: "play.circle")
                     .font(.title3)
                     .padding(6)
@@ -1005,6 +1478,12 @@ struct MapEditorView: View {
         .clipShape(Capsule())
         .shadow(radius: 6, y: 2)
     }
+
+    private func openPreviewIfPossible() {
+        guard !isPreviewing else { return }
+        guard !viewModel.blueprint.spawnPoints.isEmpty else { return }
+        isPreviewing = true
+    }
 }
 
 private struct MapCanvasView: View {
@@ -1014,12 +1493,14 @@ private struct MapCanvasView: View {
     let zoom: Double
     let selectedSpawnID: PlayerSpawnPoint.ID?
     let selectedPlatformID: MovingPlatformBlueprint.ID?
+    let selectedSentryID: SentryBlueprint.ID?
     let previewColor: Color
     let hoveredPoint: GridPoint?
     let onHover: (GridPoint?) -> Void
     let onDragBegan: (GridPoint) -> Void
     let onDragChanged: (GridPoint) -> Void
     let onDragEnded: (GridPoint?) -> Void
+    let onFocusRequested: () -> Void
 
     @State private var isDragging = false
 
@@ -1078,6 +1559,16 @@ private struct MapCanvasView: View {
                     }
                 }
 
+                for (index, sentry) in blueprint.sentries.enumerated() {
+                    drawSentry(
+                        sentry,
+                        index: index,
+                        origin: origin,
+                        tileSize: tileSize,
+                        context: &context
+                    )
+                }
+
                 if !previewTiles.isEmpty {
                     for point in previewTiles where blueprint.contains(point) {
                         let tileRect = CGRect(
@@ -1104,6 +1595,7 @@ private struct MapCanvasView: View {
                     context.stroke(Path(highlight), with: .color(Color.yellow), lineWidth: 2)
                 }
             }
+            .contentShape(Rectangle())
             .gesture(dragGesture(origin: origin, tileSize: tileSize, mapSize: mapSize))
             .onHover { hovering in
 #if os(macOS)
@@ -1123,6 +1615,7 @@ private struct MapCanvasView: View {
     private func dragGesture(origin: CGPoint, tileSize: CGFloat, mapSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                onFocusRequested()
                 let location = CGPoint(x: value.location.x - origin.x, y: value.location.y - origin.y)
                 guard let point = pointForLocation(location, tileSize: tileSize, mapSize: mapSize) else {
                     onHover(nil)
@@ -1137,9 +1630,13 @@ private struct MapCanvasView: View {
                 }
             }
             .onEnded { value in
-                isDragging = false
+                onFocusRequested()
                 let location = CGPoint(x: value.location.x - origin.x, y: value.location.y - origin.y)
                 let point = pointForLocation(location, tileSize: tileSize, mapSize: mapSize)
+                if !isDragging, let point {
+                    onDragBegan(point)
+                }
+                isDragging = false
                 onDragEnded(point)
                 onHover(nil)
             }
@@ -1176,6 +1673,58 @@ private struct MapCanvasView: View {
             path.addLine(to: CGPoint(x: origin.x + mapSize.width, y: y))
         }
         context.stroke(path, with: .color(gridColor), lineWidth: 1)
+    }
+
+    private func drawSentry(
+        _ sentry: SentryBlueprint,
+        index: Int,
+        origin: CGPoint,
+        tileSize: CGFloat,
+        context: inout GraphicsContext
+    ) {
+        let color = SentryPalette.color(for: index)
+        let center = CGPoint(
+            x: origin.x + (CGFloat(sentry.coordinate.column) + 0.5) * tileSize,
+            y: origin.y + (CGFloat(sentry.coordinate.row) + 0.5) * tileSize
+        )
+        let baseRadius = tileSize * 0.35
+        let circle = Path(ellipseIn: CGRect(x: center.x - baseRadius, y: center.y - baseRadius, width: baseRadius * 2, height: baseRadius * 2))
+        context.fill(circle, with: .color(color.opacity(0.85)))
+
+        if sentry.id == selectedSentryID {
+            context.stroke(circle, with: .color(.white), lineWidth: 2)
+        }
+
+        let rangePixels = CGFloat(sentry.scanRange) * tileSize
+        if rangePixels > 4 {
+            let centerAngle = sentry.scanCenterDegrees * .pi / 180.0
+            let halfArc = max(5.0, sentry.scanArcDegrees * 0.5) * .pi / 180.0
+            let startAngle = centerAngle - halfArc
+            let endAngle = centerAngle + halfArc
+            var wedge = Path()
+            wedge.move(to: center)
+            let segments = max(12, Int(sentry.scanArcDegrees / 10.0))
+            for i in 0...segments {
+                let t = Double(i) / Double(segments)
+                let angle = startAngle + (endAngle - startAngle) * t
+                let point = CGPoint(
+                    x: center.x + CGFloat(cos(angle)) * rangePixels,
+                    y: center.y + CGFloat(sin(angle)) * rangePixels
+                )
+                wedge.addLine(to: point)
+            }
+            wedge.closeSubpath()
+            context.fill(wedge, with: .color(color.opacity(0.15)))
+
+            var line = Path()
+            let tip = CGPoint(
+                x: center.x + CGFloat(cos(centerAngle)) * rangePixels,
+                y: center.y + CGFloat(sin(centerAngle)) * rangePixels
+            )
+            line.move(to: center)
+            line.addLine(to: tip)
+            context.stroke(line, with: .color(color.opacity(0.5)), lineWidth: 2)
+        }
     }
 }
 

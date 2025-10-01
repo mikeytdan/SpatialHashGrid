@@ -111,13 +111,79 @@ struct MovingPlatformBlueprint: Identifiable, Hashable {
     var size: GridSize
     var target: GridPoint
     var speed: Double
+    var initialProgress: Double
 
-    init(id: UUID = UUID(), origin: GridPoint, size: GridSize, target: GridPoint, speed: Double = 1.0) {
+    init(
+        id: UUID = UUID(),
+        origin: GridPoint,
+        size: GridSize,
+        target: GridPoint,
+        speed: Double = 1.0,
+        initialProgress: Double = 0.0
+    ) {
         self.id = id
         self.origin = origin
         self.size = size
         self.target = target
         self.speed = speed
+        self.initialProgress = initialProgress
+        clampInitialProgress()
+    }
+
+    mutating func clampInitialProgress() {
+        initialProgress = max(0.0, min(initialProgress, 1.0))
+    }
+}
+
+struct SentryBlueprint: Identifiable, Hashable {
+    let id: UUID
+    var coordinate: GridPoint
+    var scanRange: Double
+    var scanCenterDegrees: Double
+    var scanArcDegrees: Double
+    var sweepSpeedDegreesPerSecond: Double
+    var fireCooldown: Double
+    var projectileSpeed: Double
+    var aimToleranceDegrees: Double
+    var initialFacingDegrees: Double
+
+    init(
+        id: UUID = UUID(),
+        coordinate: GridPoint,
+        scanRange: Double = 8.0,
+        scanCenterDegrees: Double = 0.0,
+        scanArcDegrees: Double = 90.0,
+        sweepSpeedDegreesPerSecond: Double = 60.0,
+        fireCooldown: Double = 1.2,
+        projectileSpeed: Double = 900.0,
+        aimToleranceDegrees: Double = 6.0,
+        initialFacingDegrees: Double? = nil
+    ) {
+        self.id = id
+        self.coordinate = coordinate
+        self.scanRange = scanRange
+        self.scanCenterDegrees = scanCenterDegrees
+        self.scanArcDegrees = scanArcDegrees
+        self.sweepSpeedDegreesPerSecond = sweepSpeedDegreesPerSecond
+        self.fireCooldown = fireCooldown
+        self.projectileSpeed = projectileSpeed
+        self.aimToleranceDegrees = aimToleranceDegrees
+        let halfArc = max(5.0, scanArcDegrees * 0.5)
+        let defaultFacing = scanCenterDegrees - halfArc
+        let desired = initialFacingDegrees ?? defaultFacing
+        self.initialFacingDegrees = desired
+        clampInitialFacing()
+    }
+
+    mutating func clampInitialFacing() {
+        let halfArc = max(5.0, scanArcDegrees * 0.5)
+        let minAngle = scanCenterDegrees - halfArc
+        let maxAngle = scanCenterDegrees + halfArc
+        if initialFacingDegrees < minAngle {
+            initialFacingDegrees = minAngle
+        } else if initialFacingDegrees > maxAngle {
+            initialFacingDegrees = maxAngle
+        }
     }
 }
 
@@ -128,6 +194,7 @@ struct LevelBlueprint {
     private var tiles: [GridPoint: LevelTileKind]
     private(set) var spawnPoints: [PlayerSpawnPoint]
     private(set) var movingPlatforms: [MovingPlatformBlueprint]
+    private(set) var sentries: [SentryBlueprint]
 
     init(
         rows: Int,
@@ -135,7 +202,8 @@ struct LevelBlueprint {
         tileSize: Double,
         tiles: [GridPoint: LevelTileKind] = [:],
         spawnPoints: [PlayerSpawnPoint] = [],
-        movingPlatforms: [MovingPlatformBlueprint] = []
+        movingPlatforms: [MovingPlatformBlueprint] = [],
+        sentries: [SentryBlueprint] = []
     ) {
         self.rows = rows
         self.columns = columns
@@ -143,6 +211,7 @@ struct LevelBlueprint {
         self.tiles = tiles
         self.spawnPoints = spawnPoints
         self.movingPlatforms = movingPlatforms
+        self.sentries = sentries
     }
 
     func tile(at point: GridPoint) -> LevelTileKind {
@@ -220,12 +289,24 @@ struct LevelBlueprint {
     // MARK: - Moving Platforms
 
     @discardableResult
-    mutating func addMovingPlatform(origin: GridPoint, size: GridSize, target: GridPoint, speed: Double = 1.0) -> MovingPlatformBlueprint? {
+    mutating func addMovingPlatform(
+        origin: GridPoint,
+        size: GridSize,
+        target: GridPoint,
+        speed: Double = 1.0,
+        initialProgress: Double = 0.0
+    ) -> MovingPlatformBlueprint? {
         guard contains(origin) else { return nil }
         guard contains(GridPoint(row: origin.row + size.rows - 1, column: origin.column + size.columns - 1)) else { return nil }
         guard contains(target) else { return nil }
         guard contains(GridPoint(row: target.row + size.rows - 1, column: target.column + size.columns - 1)) else { return nil }
-        let platform = MovingPlatformBlueprint(origin: origin, size: size, target: target, speed: speed)
+        let platform = MovingPlatformBlueprint(
+            origin: origin,
+            size: size,
+            target: target,
+            speed: speed,
+            initialProgress: initialProgress
+        )
         movingPlatforms.append(platform)
         return platform
     }
@@ -233,6 +314,7 @@ struct LevelBlueprint {
     mutating func updateMovingPlatform(id: MovingPlatformBlueprint.ID, mutate: (inout MovingPlatformBlueprint) -> Void) {
         guard let index = movingPlatforms.firstIndex(where: { $0.id == id }) else { return }
         mutate(&movingPlatforms[index])
+        movingPlatforms[index].clampInitialProgress()
     }
 
     mutating func removeMovingPlatform(id: MovingPlatformBlueprint.ID) {
@@ -242,6 +324,34 @@ struct LevelBlueprint {
     func movingPlatform(id: MovingPlatformBlueprint.ID) -> MovingPlatformBlueprint? {
         movingPlatforms.first(where: { $0.id == id })
     }
+
+    // MARK: - Sentries
+
+    @discardableResult
+    mutating func addSentry(at point: GridPoint) -> SentryBlueprint? {
+        guard contains(point) else { return nil }
+        let sentry = SentryBlueprint(coordinate: point)
+        sentries.append(sentry)
+        return sentry
+    }
+
+    mutating func removeSentry(id: SentryBlueprint.ID) {
+        sentries.removeAll { $0.id == id }
+    }
+
+    mutating func updateSentry(id: SentryBlueprint.ID, mutate: (inout SentryBlueprint) -> Void) {
+        guard let index = sentries.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&sentries[index])
+        sentries[index].clampInitialFacing()
+    }
+
+    func sentry(id: SentryBlueprint.ID) -> SentryBlueprint? {
+        sentries.first(where: { $0.id == id })
+    }
+
+    func sentry(at point: GridPoint) -> SentryBlueprint? {
+        sentries.first(where: { $0.coordinate.row == point.row && $0.coordinate.column == point.column })
+    }
 }
 
 /// Adapters translate a blueprint into runtime-ready data for a rendering / simulation engine.
@@ -250,7 +360,7 @@ protocol LevelRuntimeAdapter {
     /// Human-readable engine name for UI toggles.
     static var engineName: String { get }
     /// Builds a play-preview view. The adapter is responsible for starting/stopping underlying runtime.
-    func makePreview(for blueprint: LevelBlueprint, onStop: @escaping () -> Void) -> PreviewView
+    func makePreview(for blueprint: LevelBlueprint, input: InputController, onStop: @escaping () -> Void) -> PreviewView
 }
 
 /// Engines that need to receive callbacks when the preview becomes active/inactive can conform to this protocol.

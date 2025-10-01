@@ -56,3 +56,26 @@ enum PlatformPalette {
     }
     #endif
 }
+
+enum SentryPalette {
+    private static let colors: [Color] = [
+        .red, .orange, .yellow, .green, .teal, .cyan, .blue, .purple
+    ]
+
+    static func color(for index: Int) -> Color {
+        guard !colors.isEmpty else { return .accentColor }
+        return colors[index % colors.count]
+    }
+
+    #if canImport(UIKit)
+    static func uiColor(for index: Int) -> UIColor {
+        UIColor(color(for: index))
+    }
+    #endif
+
+    #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+    static func nsColor(for index: Int) -> NSColor {
+        NSColor(color(for: index))
+    }
+    #endif
+}
