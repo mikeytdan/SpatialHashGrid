@@ -45,9 +45,35 @@ public struct Material: Sendable {
     }
 }
 
-public enum Shape {
+public enum Shape: Equatable {
     case aabb
-    // Extend later: .ramp, .circle, .capsule
+    case ramp(RampData)
+    case capsule(CapsuleData)
+    // Future: .circle, .capsule
+}
+
+/// Metadata for ramp/slope colliders stored alongside their AABB proxy.
+public struct RampData: Equatable, Sendable {
+    public enum Kind: Int32, Sendable {
+        case upRight      // surface rises as x increases (bottom-left to top-right)
+        case upLeft       // surface rises as x decreases (bottom-right to top-left)
+    }
+
+    public var kind: Kind
+
+    public init(kind: Kind) {
+        self.kind = kind
+    }
+}
+
+public struct CapsuleData: Equatable, Sendable {
+    public var radius: Double
+    public var height: Double
+
+    public init(radius: Double, height: Double) {
+        self.radius = radius
+        self.height = height
+    }
 }
 
 public struct Collider {

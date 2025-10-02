@@ -7,6 +7,7 @@ import SwiftUI
 final class MapEditorViewModel: ObservableObject {
     enum Tool: String, CaseIterable, Identifiable {
         case pencil
+        case flood
         case line
         case rectangle
         case eraser
@@ -21,6 +22,7 @@ final class MapEditorViewModel: ObservableObject {
         var label: String {
             switch self {
             case .pencil: return "Pencil"
+            case .flood: return "Flood Fill"
             case .line: return "Line"
             case .rectangle: return "Rectangle"
             case .eraser: return "Eraser"
@@ -35,6 +37,7 @@ final class MapEditorViewModel: ObservableObject {
         var systemImage: String {
             switch self {
             case .pencil: return "pencil"
+            case .flood: return "paintbrush.pointed.fill"
             case .line: return "line.diagonal"
             case .rectangle: return "square.dashed"
             case .eraser: return "eraser"
@@ -128,6 +131,11 @@ final class MapEditorViewModel: ObservableObject {
 
     var paintTileKind: LevelTileKind {
         selectedTileKind == .empty ? .stone : selectedTileKind
+    }
+
+    func toggleSelectedRampOrientation() {
+        guard let flipped = selectedTileKind.flippedRamp else { return }
+        selectedTileKind = flipped
     }
 
     func updateHover(_ point: GridPoint?) {
@@ -597,6 +605,11 @@ final class MapEditorViewModel: ObservableObject {
         switch tool {
         case .pencil:
             paintSolid(at: point)
+        case .flood:
+            if isInitial {
+                shapePreview.removeAll()
+                performFloodFill(at: point)
+            }
         case .line:
             shapePreview = pointsForLine(from: dragStartPoint ?? point, to: point)
         case .eraser:
@@ -631,6 +644,38 @@ final class MapEditorViewModel: ObservableObject {
         guard lastPaintedPoint != point else { return }
         lastPaintedPoint = point
         blueprint.setTile(.empty, at: point)
+    }
+
+    private func performFloodFill(at start: GridPoint) {
+        guard blueprint.contains(start) else { return }
+        guard lastPaintedPoint != start else { return }
+
+        let targetKind = blueprint.tile(at: start)
+        let replacement = paintTileKind
+        if targetKind == replacement { return }
+
+        var stack: [GridPoint] = [start]
+        var visited: Set<GridPoint> = [start]
+
+        while let current = stack.popLast() {
+            blueprint.setTile(replacement, at: current)
+
+            let neighbors = [
+                current.offsetting(rowDelta: -1),
+                current.offsetting(rowDelta: 1),
+                current.offsetting(columnDelta: -1),
+                current.offsetting(columnDelta: 1)
+            ]
+
+            for neighbor in neighbors where blueprint.contains(neighbor) && !visited.contains(neighbor) {
+                if blueprint.tile(at: neighbor) == targetKind {
+                    visited.insert(neighbor)
+                    stack.append(neighbor)
+                }
+            }
+        }
+
+        lastPaintedPoint = start
     }
 
     private func moveSpawn(to point: GridPoint, isInitial: Bool) {
@@ -1096,22 +1141,7 @@ struct MapEditorView: View {
                     Button {
                         viewModel.selectedTileKind = tile
                     } label: {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(tile.fillColor)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(tile.borderColor, lineWidth: 2)
-                            )
-                            .overlay(alignment: .topTrailing) {
-                                if viewModel.selectedTileKind == tile {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(.white)
-                                        .shadow(radius: 2)
-                                        .padding(4)
-                                }
-                            }
-                            .frame(width: 48, height: 48)
+                        TileSwatch(tile: tile, isSelected: viewModel.selectedTileKind == tile)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(tile.displayName)
@@ -1121,6 +1151,21 @@ struct MapEditorView: View {
             Text("Selected: \(viewModel.selectedTileKind.displayName)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+
+            if viewModel.selectedTileKind.isRamp {
+                HStack(spacing: 8) {
+                    Button {
+                        viewModel.toggleSelectedRampOrientation()
+                    } label: {
+                        Label("Flip Ramp", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Text("Ramp tiles paint with the shown slope; flip to match your layout.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -1769,7 +1814,30 @@ private struct MapCanvasView: View {
                         width: tileSize,
                         height: tileSize
                     )
-                    let path = Path(tileRect)
+
+                    let path: Path
+                    if let rampKind = kind.rampKind {
+                        var rampPath = Path()
+                        let minX = tileRect.minX
+                        let maxX = tileRect.maxX
+                        let minY = tileRect.minY
+                        let maxY = tileRect.maxY
+                        switch rampKind {
+                        case .upRight:
+                            rampPath.move(to: CGPoint(x: minX, y: maxY))
+                            rampPath.addLine(to: CGPoint(x: maxX, y: maxY))
+                            rampPath.addLine(to: CGPoint(x: maxX, y: minY))
+                        case .upLeft:
+                            rampPath.move(to: CGPoint(x: minX, y: minY))
+                            rampPath.addLine(to: CGPoint(x: minX, y: maxY))
+                            rampPath.addLine(to: CGPoint(x: maxX, y: maxY))
+                        }
+                        rampPath.closeSubpath()
+                        path = rampPath
+                    } else {
+                        path = Path(tileRect)
+                    }
+
                     context.fill(path, with: .color(kind.fillColor))
                     context.stroke(path, with: .color(kind.borderColor), lineWidth: 1)
                 }
@@ -1983,4 +2051,56 @@ private struct MapCanvasView: View {
 
 private extension CGRect {
     var center: CGPoint { CGPoint(x: midX, y: midY) }
+}
+
+private struct TileSwatch: View {
+    let tile: LevelTileKind
+    let isSelected: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+
+            Canvas { context, size in
+                let rect = CGRect(origin: .zero, size: size).insetBy(dx: 6, dy: 6)
+
+                if let ramp = tile.rampKind {
+                    var path = Path()
+                    switch ramp {
+                    case .upRight:
+                        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+                        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+                        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+                    case .upLeft:
+                        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+                        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+                        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+                    }
+                    path.closeSubpath()
+                    context.fill(path, with: .color(tile.fillColor))
+                    context.stroke(path, with: .color(tile.borderColor), lineWidth: 2)
+                } else {
+                    let shape = Path(roundedRect: rect, cornerRadius: 6)
+                    context.fill(shape, with: .color(tile.fillColor))
+                    context.stroke(shape, with: .color(tile.borderColor), lineWidth: 2)
+                }
+            }
+            .allowsHitTesting(false)
+
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .shadow(radius: 2)
+                    .padding(6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+        )
+        .frame(width: 48, height: 48)
+    }
 }

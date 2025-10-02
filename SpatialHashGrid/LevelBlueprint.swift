@@ -33,6 +33,8 @@ enum LevelTileKind: String, CaseIterable, Identifiable {
     case teal
     case cobalt
     case obsidian
+    case rampUpRight
+    case rampUpLeft
 
     var id: String { rawValue }
 
@@ -51,6 +53,8 @@ enum LevelTileKind: String, CaseIterable, Identifiable {
         case .teal: "Teal"
         case .cobalt: "Cobalt"
         case .obsidian: "Obsidian"
+        case .rampUpRight: "Ramp Up Right"
+        case .rampUpLeft: "Ramp Up Left"
         }
     }
 
@@ -65,6 +69,8 @@ enum LevelTileKind: String, CaseIterable, Identifiable {
         case .teal: Color(red: 0.27, green: 0.66, blue: 0.70)
         case .cobalt: Color(red: 0.29, green: 0.43, blue: 0.82)
         case .obsidian: Color(red: 0.18, green: 0.20, blue: 0.26)
+        case .rampUpRight: Color(red: 0.47, green: 0.62, blue: 0.90)
+        case .rampUpLeft: Color(red: 0.52, green: 0.76, blue: 0.58)
         }
     }
 
@@ -79,11 +85,33 @@ enum LevelTileKind: String, CaseIterable, Identifiable {
         case .teal: Color(red: 0.17, green: 0.49, blue: 0.52)
         case .cobalt: Color(red: 0.19, green: 0.30, blue: 0.58)
         case .obsidian: Color(red: 0.10, green: 0.12, blue: 0.17)
+        case .rampUpRight: Color(red: 0.28, green: 0.43, blue: 0.70)
+        case .rampUpLeft: Color(red: 0.30, green: 0.54, blue: 0.34)
         }
     }
 
     static var palette: [LevelTileKind] {
         allCases.filter { $0 != .empty }
+    }
+
+    var rampKind: RampData.Kind? {
+        switch self {
+        case .rampUpRight: return .upRight
+        case .rampUpLeft: return .upLeft
+        default: return nil
+        }
+    }
+
+    var isRamp: Bool { rampKind != nil }
+
+    var isRectangularSolid: Bool { isSolid && !isRamp }
+
+    var flippedRamp: LevelTileKind? {
+        switch self {
+        case .rampUpRight: return .rampUpLeft
+        case .rampUpLeft: return .rampUpRight
+        default: return nil
+        }
     }
 }
 

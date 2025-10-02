@@ -41,4 +41,33 @@ struct TileMapBuilder {
             y += 1
         }
     }
+
+    // Build from level tile entries. Rectangular solids are merged; ramps spawn individual colliders.
+    func build(
+        tiles: [(GridPoint, LevelTileKind)],
+        rows: Int,
+        columns: Int,
+        material: Material = .init(friction: 0.0)
+    ) {
+        guard rows > 0, columns > 0 else { return }
+        var solids = Array(repeating: Array(repeating: false, count: columns), count: rows)
+
+        for (point, kind) in tiles {
+            guard point.row >= 0, point.row < rows, point.column >= 0, point.column < columns else { continue }
+            if let rampKind = kind.rampKind {
+                let minP = Vec2(Double(point.column) * tileSize, Double(point.row) * tileSize)
+                let maxP = Vec2(Double(point.column + 1) * tileSize, Double(point.row + 1) * tileSize)
+                let aabb = AABB(min: minP, max: maxP)
+                var rampMaterial = material
+                if rampMaterial.friction == 0 {
+                    rampMaterial.friction = 1.0
+                }
+                _ = world.addStaticRamp(aabb: aabb, kind: rampKind, material: rampMaterial)
+            } else if kind.isRectangularSolid {
+                solids[point.row][point.column] = true
+            }
+        }
+
+        build(solids: solids, material: material)
+    }
 }

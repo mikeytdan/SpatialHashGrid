@@ -6,11 +6,11 @@
 ## Build, Test, and Development Commands
 Open `SpatialHashGrid.xcodeproj` in Xcode 16+ targeting the iOS simulator. From the CLI, a full debug build runs via:
 ```bash
-xcodebuild -project SpatialHashGrid.xcodeproj -scheme SpatialHashGrid -destination 'platform=iOS Simulator,name=iPhone 15' -configuration Debug build
+xcodebuild -project SpatialHashGrid.xcodeproj -scheme SpatialHashGrid -destination 'platform=iOS Simulator,name=iPhone 17' -configuration Debug build
 ```
 Run the logic test suite (no UI boots) with:
 ```bash
-xcodebuild test -project SpatialHashGrid.xcodeproj -scheme SpatialHashGrid -destination 'platform=iOS Simulator,name=iPhone 15'
+xcodebuild test -project SpatialHashGrid.xcodeproj -scheme SpatialHashGrid -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 Leave heavy profiling in the Performance Tests section gated by `#if DEBUG` if you add new timers.
 

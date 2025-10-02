@@ -47,6 +47,16 @@ final class PhysicsWorld {
     }
 
     @discardableResult
+    func addStaticRamp(aabb: AABB, kind: RampData.Kind, material: Material = .init()) -> ColliderID {
+        let id = allocID()
+        let shape = Shape.ramp(RampData(kind: kind))
+        let col = Collider(id: id, aabb: aabb, shape: shape, type: .staticTile, material: material)
+        colliders[id] = col
+        staticGrid.insert(id: id, aabb: aabb)
+        return id
+    }
+
+    @discardableResult
     func addTrigger(aabb: AABB, material: Material) -> ColliderID {
         let id = allocID()
         let col = Collider(id: id, aabb: aabb, shape: .aabb, type: .trigger, material: material)
@@ -67,9 +77,9 @@ final class PhysicsWorld {
     }
 
     @discardableResult
-    func addDynamicEntity(aabb: AABB, material: Material = .init()) -> ColliderID {
+    func addDynamicEntity(aabb: AABB, material: Material = .init(), shape: Shape = .aabb) -> ColliderID {
         let id = allocID()
-        let col = Collider(id: id, aabb: aabb, shape: .aabb, type: .dynamicEntity, material: material)
+        let col = Collider(id: id, aabb: aabb, shape: shape, type: .dynamicEntity, material: material)
         colliders[id] = col
         dynamicGrid.insert(id: id, aabb: aabb)
         return id
@@ -150,6 +160,7 @@ final class PhysicsWorld {
         var position: Vec2
         var velocity: Vec2
         var size: Vec2 // half-extent
+        var capsuleRadius: Double = 0
     }
 
     func integrateKinematic(
@@ -173,6 +184,7 @@ final class PhysicsWorld {
             position: &position,
             velocity: &velocity,
             halfSize: halfSize,
+            capsuleRadius: state.capsuleRadius,
             allowOneWay: allowOneWay,
             outContacts: &outContacts
         )
@@ -183,6 +195,7 @@ final class PhysicsWorld {
             halfSize: halfSize,
             axis: .x,
             desiredMove: velocity.x * dt,
+            capsuleRadius: state.capsuleRadius,
             allowOneWay: allowOneWay
         )
         position.x += moveX
@@ -198,6 +211,7 @@ final class PhysicsWorld {
                 position: &position,
                 velocity: &velocity,
                 halfSize: halfSize,
+                capsuleRadius: state.capsuleRadius,
                 allowOneWay: allowOneWay,
                 outContacts: &outContacts
             )
@@ -209,6 +223,7 @@ final class PhysicsWorld {
             halfSize: halfSize,
             axis: .y,
             desiredMove: velocity.y * dt,
+            capsuleRadius: state.capsuleRadius,
             allowOneWay: allowOneWay
         )
         position.y += moveY
@@ -226,9 +241,25 @@ final class PhysicsWorld {
             position: &position,
             velocity: &velocity,
             halfSize: halfSize,
+            capsuleRadius: state.capsuleRadius,
             allowOneWay: allowOneWay,
             outContacts: &outContacts
         )
+
+        if !outContacts.isEmpty {
+            for contact in outContacts {
+                guard contact.normal.y < -0.3 && abs(contact.normal.x) > 0.1,
+                      let collider = colliders[contact.other],
+                      case .ramp = collider.shape else { continue }
+                let friction = min(max(collider.material.friction, 0.0), 1.0)
+                if friction >= 0.999 { continue }
+                let tangent = normalized(Vec2(-contact.normal.y, contact.normal.x))
+                let gravityAlong = simd_dot(gravity, tangent)
+                if abs(gravityAlong) < 1e-6 { continue }
+                let slip = 1.0 - friction
+                velocity += tangent * (gravityAlong * dt * slip)
+            }
+        }
 
         state.position = position
         state.velocity = velocity
@@ -273,6 +304,7 @@ private extension PhysicsWorld {
         position: inout Vec2,
         velocity: inout Vec2,
         halfSize: Vec2,
+        capsuleRadius: Double?,
         allowOneWay: Bool,
         outContacts: inout [Contact]
     ) {
@@ -294,6 +326,39 @@ private extension PhysicsWorld {
                 let overlapX = min(aabb.max.x, b.max.x) - max(aabb.min.x, b.min.x)
                 let overlapY = min(aabb.max.y, b.max.y) - max(aabb.min.y, b.min.y)
                 if overlapX <= 0 || overlapY <= 0 { continue }
+
+                if case .ramp(let rampData) = other.shape {
+                    guard let info = rampContactInfo(moving: aabb, ramp: b, kind: rampData.kind) else { continue }
+
+                    let (footCenter, footRadius) = footParameters(position: position, halfSize: halfSize, capsuleRadius: capsuleRadius)
+                    let requiredDistance = footRadius + separationEpsilon
+                    let currentDistance = simd_dot(footCenter - info.planePoint, info.normal)
+
+                    if currentDistance < requiredDistance {
+                        let delta = requiredDistance - currentDistance
+                        position += info.normal * delta
+                        let vn = simd_dot(velocity, info.normal)
+                        if vn < 0 {
+                            velocity -= info.normal * vn
+                        }
+
+                        let contactPoint = rampContactPoint(position: position, halfSize: halfSize, normal: info.normal, capsuleRadius: capsuleRadius)
+                        outContacts.append(Contact(
+                            other: cid,
+                            normal: info.normal,
+                            depth: delta,
+                            point: contactPoint
+                        ))
+
+                        resolvedAny = true
+                        break
+                    } else if currentDistance - footRadius <= separationEpsilon * 4 {
+                        let contactPoint = rampContactPoint(position: position, halfSize: halfSize, normal: info.normal, capsuleRadius: capsuleRadius)
+                        outContacts.append(Contact(other: cid, normal: info.normal, depth: max(0, requiredDistance - currentDistance), point: contactPoint))
+                    }
+
+                    continue
+                }
 
                 var normal = Vec2(0, 0)
                 var depth: Double = 0
@@ -352,6 +417,7 @@ private extension PhysicsWorld {
         halfSize: Vec2,
         axis: Axis,
         desiredMove: Double,
+        capsuleRadius: Double?,
         allowOneWay: Bool
     ) -> (Double, Contact?) {
         guard desiredMove != 0 else { return (0, nil) }
@@ -372,6 +438,10 @@ private extension PhysicsWorld {
             case .x:
                 let overlapY = min(startAABB.max.y, b.max.y) - max(startAABB.min.y, b.min.y)
                 if overlapY <= 0 { continue }
+
+                if case .ramp = other.shape {
+                    continue
+                }
 
                 if desiredMove > 0 {
                     let gap = b.min.x - startAABB.max.x
@@ -408,6 +478,52 @@ private extension PhysicsWorld {
             case .y:
                 let overlapX = min(startAABB.max.x, b.max.x) - max(startAABB.min.x, b.min.x)
                 if overlapX <= 0 { continue }
+
+                if case .ramp(let rampData) = other.shape {
+                    if desiredMove > 0 { // downward sweep only
+                        guard let rampInfo = rampContactInfo(
+                            moving: startAABB,
+                            ramp: b,
+                            kind: rampData.kind
+                        ) else { continue }
+
+                        if allowOneWay && other.material.oneWay {
+                            let startBottom = startAABB.max.y
+                            let surfaceTop = rampInfo.ySurface
+                            if startBottom - surfaceTop > 4 { continue }
+                        }
+
+                        let (footCenter, footRadius) = footParameters(position: position, halfSize: halfSize, capsuleRadius: capsuleRadius)
+                        let planePoint = rampInfo.planePoint
+                        let currentDistance = simd_dot(footCenter - planePoint, rampInfo.normal)
+                        let requiredDistance = footRadius + separationEpsilon
+                        let deltaNormal = simd_dot(Vec2(0, desiredMove), rampInfo.normal)
+                        if deltaNormal < 0 {
+                            let maxAllowedNormalDecrease = currentDistance - requiredDistance
+                            if maxAllowedNormalDecrease <= 0 {
+                                if 0 < permitted {
+                                    permitted = 0
+                                    let normal = rampInfo.normal
+                                    let finalPos = Vec2(position.x, position.y)
+                                    let point = rampContactPoint(position: finalPos, halfSize: halfSize, normal: normal, capsuleRadius: capsuleRadius)
+                                    bestContact = Contact(other: cid, normal: normal, depth: 0, point: point)
+                                }
+                                continue
+                            }
+                            let ratio = maxAllowedNormalDecrease / -deltaNormal
+                            let newMove = max(0, min(desiredMove, desiredMove * ratio))
+                            if newMove < permitted {
+                                permitted = newMove
+                                let normal = rampInfo.normal
+                                let finalPos = Vec2(position.x, position.y + permitted)
+                                let depth = abs(desiredMove - permitted)
+                                let point = rampContactPoint(position: finalPos, halfSize: halfSize, normal: normal, capsuleRadius: capsuleRadius)
+                                bestContact = Contact(other: cid, normal: normal, depth: depth, point: point)
+                            }
+                        }
+                    }
+                    continue
+                }
 
                 if desiredMove > 0 { // moving downward (y+)
                     let forwardThreshold = startAABB.max.y - separationEpsilon * 4
@@ -465,5 +581,89 @@ private extension PhysicsWorld {
             point.y += normal.y * halfSize.y
         }
         return point
+    }
+
+    struct RampContactInfo {
+        let normal: Vec2
+        let ySurface: Double
+        let xSurface: Double
+        let planePoint: Vec2
+    }
+
+    func rampContactInfo(moving: AABB, ramp: AABB, kind: RampData.Kind) -> RampContactInfo? {
+        let xmin = max(moving.min.x, ramp.min.x)
+        let xmax = min(moving.max.x, ramp.max.x)
+        if xmin >= xmax { return nil }
+
+        let contactX: Double
+        switch kind {
+        case .upRight:
+            contactX = xmin
+        case .upLeft:
+            contactX = xmax
+        }
+
+        let ySurf = rampSurfaceY(ramp: ramp, kind: kind, x: contactX)
+        let normal = rampNormal(ramp: ramp, kind: kind)
+        let planePoint = rampPlanePoint(ramp: ramp, kind: kind)
+        return RampContactInfo(normal: normal, ySurface: ySurf, xSurface: contactX, planePoint: planePoint)
+    }
+
+    func rampSurfaceY(ramp: AABB, kind: RampData.Kind, x: Double) -> Double {
+        let bx0 = ramp.min.x
+        let bx1 = ramp.max.x
+        let by0 = ramp.min.y
+        let by1 = ramp.max.y
+        let w = max(bx1 - bx0, 0.0001)
+        let h = max(by1 - by0, 0.0001)
+        let clampedX = min(max(x, bx0), bx1)
+        let slope = h / w
+
+        switch kind {
+        case .upRight:
+            let dx = clampedX - bx0
+            return by1 - dx * slope
+        case .upLeft:
+            let dx = bx1 - clampedX
+            return by1 - dx * slope
+        }
+    }
+
+    func rampNormal(ramp: AABB, kind: RampData.Kind) -> Vec2 {
+        let w = max(ramp.max.x - ramp.min.x, 0.0001)
+        let h = max(ramp.max.y - ramp.min.y, 0.0001)
+        switch kind {
+        case .upRight:
+            return normalized(Vec2(-h, -w))
+        case .upLeft:
+            return normalized(Vec2(h, -w))
+        }
+    }
+
+    func rampPlanePoint(ramp: AABB, kind: RampData.Kind) -> Vec2 {
+        switch kind {
+        case .upRight:
+            return Vec2(ramp.min.x, ramp.max.y)
+        case .upLeft:
+            return Vec2(ramp.max.x, ramp.max.y)
+        }
+    }
+
+    func footParameters(position: Vec2, halfSize: Vec2, capsuleRadius: Double?) -> (center: Vec2, radius: Double) {
+        let radius = max(capsuleRadius ?? 0, 0)
+        let offset = max(0, halfSize.y - radius)
+        let center = Vec2(position.x, position.y + offset)
+        return (center, radius)
+    }
+
+    func rampContactPoint(position: Vec2, halfSize: Vec2, normal: Vec2, capsuleRadius: Double?) -> Vec2 {
+        let (center, radius) = footParameters(position: position, halfSize: halfSize, capsuleRadius: capsuleRadius)
+        return center - normal * radius
+    }
+
+    func normalized(_ v: Vec2) -> Vec2 {
+        let len = simd_length(v)
+        if len <= 1e-8 { return Vec2(0, 0) }
+        return v / len
     }
 }

@@ -92,15 +92,18 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         world = PhysicsWorld(cellSize: blueprint.tileSize, reserve: 4096, estimateCells: 4096)
         world.gravity = Vec2(0, 1800)
 
-        var grid = Array(repeating: Array(repeating: false, count: blueprint.columns), count: blueprint.rows)
-        for point in blueprint.solidTiles() {
+        let entries = blueprint.tileEntries()
+        var occupancy = Array(repeating: Array(repeating: false, count: blueprint.columns), count: blueprint.rows)
+        for (point, kind) in entries {
             guard blueprint.contains(point) else { continue }
-            grid[point.row][point.column] = true
+            if kind.isSolid {
+                occupancy[point.row][point.column] = true
+            }
         }
-        solidMask = grid
+        solidMask = occupancy
 
         let builder = TileMapBuilder(world: world, tileSize: blueprint.tileSize)
-        builder.build(solids: grid)
+        builder.build(tiles: entries, rows: blueprint.rows, columns: blueprint.columns)
 
         let spawnPoint = blueprint.spawnPoints.first?.coordinate ?? GridPoint(row: blueprint.rows - 3, column: 2)
         let spawnPosition = LevelPreviewRuntime.worldPosition(for: spawnPoint, tileSize: blueprint.tileSize)
@@ -807,7 +810,25 @@ final class SpriteKitLevelPreviewScene: SKScene {
         for (point, kind) in runtime.blueprint.tileEntries() where kind.isSolid {
             let rect = rectForGridPoint(point)
             let path = paths[kind] ?? CGMutablePath()
-            path.addRect(rect)
+            if let rampKind = kind.rampKind {
+                let minX = rect.minX
+                let maxX = rect.maxX
+                let minY = rect.minY
+                let maxY = rect.maxY
+                switch rampKind {
+                case .upRight:
+                    path.move(to: CGPoint(x: minX, y: minY)) // bottom-left
+                    path.addLine(to: CGPoint(x: maxX, y: minY)) // bottom-right
+                    path.addLine(to: CGPoint(x: maxX, y: maxY)) // top-right
+                case .upLeft:
+                    path.move(to: CGPoint(x: minX, y: minY)) // bottom-left
+                    path.addLine(to: CGPoint(x: maxX, y: minY)) // bottom-right
+                    path.addLine(to: CGPoint(x: minX, y: maxY)) // top-left
+                }
+                path.closeSubpath()
+            } else {
+                path.addRect(rect)
+            }
             paths[kind] = path
         }
 

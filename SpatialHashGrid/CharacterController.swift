@@ -33,13 +33,16 @@ final class CharacterController {
 
     init(world: PhysicsWorld, spawn: Vec2) {
         self.world = world
+        let radius = width * 0.5
         let half = Vec2(width * 0.5, height * 0.5)
         let aabb = AABB(
             min: Vec2(spawn.x - half.x, spawn.y - half.y),
             max: Vec2(spawn.x + half.x, spawn.y + half.y)
         )
-        self.id = world.addDynamicEntity(aabb: aabb)
-        self.body = PhysicsWorld.BodyState(position: spawn, velocity: Vec2(0, 0), size: half)
+        let capsuleHeight = max(0, height - 2.0 * radius)
+        let shape = Shape.capsule(CapsuleData(radius: radius, height: capsuleHeight))
+        self.id = world.addDynamicEntity(aabb: aabb, material: Material(), shape: shape)
+        self.body = PhysicsWorld.BodyState(position: spawn, velocity: Vec2(0, 0), size: half, capsuleRadius: radius)
     }
 
     func setPosition(_ p: Vec2) {
