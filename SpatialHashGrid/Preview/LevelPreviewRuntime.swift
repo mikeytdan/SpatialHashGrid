@@ -1,10 +1,10 @@
-// SpriteKitLevelPreview.swift
-// Preview adapter that plays a LevelBlueprint inside SpriteKit
+// LevelPreviewRuntime.swift
+// Runtime adapter that plays a LevelBlueprint inside the Metal preview renderer
 
 import Combine
 import SwiftUI
-import SpriteKit
 import simd
+import CoreGraphics
 
 #if canImport(UIKit)
 import UIKit
@@ -21,12 +21,16 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     let worldWidth: Double
     let worldHeight: Double
     let tileSize: Double
+    var playerCharacterName: String = "player"
 
     @Published var moveAxis: Double = 0
     @Published var frameTick: Int = 0
 
     private var jumpQueued = false
     private var lastTime: CFTimeInterval = CACurrentMediaTime()
+    private var timeAccumulator: Double = 0
+    private let fixedTimeStep: Double = 1.0 / 60.0
+    private let maxStepsPerFrame = 5
     private var isRunning = true
     private var platformStates: [PlatformRuntimeState] = []
     private var platformColliderMap: [MovingPlatformBlueprint.ID: ColliderID] = [:]
@@ -36,6 +40,8 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     private var laserStates: [LaserRuntimeState] = []
     private var enemies: [EnemyController] = []
     private var enemyColorIndices: [ColliderID: Int] = [:]
+    private var playerAppearance: CharacterVisualOptions?
+    private var lastAppliedVisualSize: CGSize = .zero
 
     private struct PlatformRuntimeState {
         let blueprint: MovingPlatformBlueprint
@@ -85,6 +91,16 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         let duration: Double
     }
 
+    struct CharacterVisualSnapshot {
+        let colliderID: ColliderID
+        let aabb: AABB
+        let phase: CharacterController.MovementPhase
+        let facing: Int
+        let velocity: Vec2
+        let grounded: Bool
+        let characterName: String
+    }
+
     init(blueprint: LevelBlueprint) {
         self.blueprint = blueprint
         self.tileSize = blueprint.tileSize
@@ -92,7 +108,8 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         self.worldHeight = Double(blueprint.rows) * blueprint.tileSize
 
         world = PhysicsWorld(cellSize: blueprint.tileSize, reserve: 4096, estimateCells: 4096)
-        world.gravity = Vec2(0, 1800)
+        world.gravity = Vec2(0, 4000)
+        // world.gravity = Vec2(0, 1800)
 
         let entries = blueprint.tileEntries()
         var occupancy = Array(repeating: Array(repeating: false, count: blueprint.columns), count: blueprint.rows)
@@ -110,9 +127,11 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         let spawnPoint = blueprint.spawnPoints.first?.coordinate ?? GridPoint(row: blueprint.rows - 3, column: 2)
         let spawnPosition = LevelPreviewRuntime.worldPosition(for: spawnPoint, tileSize: blueprint.tileSize)
         player = CharacterController(world: world, spawn: spawnPosition)
-        player.moveSpeed = 320
+        player.moveSpeed = 800
+//        player.moveSpeed = 1500
         player.wallSlideSpeed = 220
-        player.jumpImpulse = 700
+//        player.jumpImpulse = 700
+        player.jumpImpulse = 1000
         player.wallJumpImpulse = Vec2(500, -700)
         player.extraJumps = 1
         player.coyoteTime = 0.12
@@ -141,12 +160,16 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         let t = CACurrentMediaTime()
         var dt = t - lastTime
         lastTime = t
+        if !dt.isFinite || dt < 0 { dt = 0 }
         if dt > 1.0 / 20.0 { dt = 1.0 / 20.0 }
-        var accumulator = dt
-        let h = 1.0 / 60.0
-        while accumulator >= h {
-            fixedStep(h)
-            accumulator -= h
+
+        timeAccumulator = min(timeAccumulator + dt, fixedTimeStep * Double(maxStepsPerFrame))
+
+        var steps = 0
+        while timeAccumulator >= fixedTimeStep && steps < maxStepsPerFrame {
+            fixedStep(fixedTimeStep)
+            timeAccumulator -= fixedTimeStep
+            steps += 1
         }
         frameTick &+= 1
     }
@@ -171,6 +194,24 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         world.collider(for: player.id)?.aabb
     }
 
+    func characterSnapshots() -> [CharacterVisualSnapshot] {
+        var snapshots: [CharacterVisualSnapshot] = []
+        if let collider = world.collider(for: player.id) {
+            let movement = player.movementSnapshot()
+            let snapshot = CharacterVisualSnapshot(
+                colliderID: player.id,
+                aabb: collider.aabb,
+                phase: movement.phase,
+                facing: movement.facing,
+                velocity: movement.velocity,
+                grounded: movement.grounded,
+                characterName: playerCharacterName
+            )
+            snapshots.append(snapshot)
+        }
+        return snapshots
+    }
+
     func playerDebug() -> PlayerDebugSnapshot {
         let aabb = world.collider(for: player.id)?.aabb
         let center = aabb?.center ?? player.body.position
@@ -187,6 +228,55 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
             groundID: player.collisions.groundID,
             facing: player.facing
         )
+    }
+
+    func configurePlayerAppearance(_ appearance: CharacterVisualOptions?) {
+        playerAppearance = appearance
+        lastAppliedVisualSize = .zero
+    }
+
+    func desiredVisualSize(for colliderID: ColliderID, frameSize: CGSize) -> CGSize {
+        guard colliderID == player.id else { return frameSize }
+        guard let appearance = playerAppearance else { return frameSize }
+
+        var scaleX: CGFloat = appearance.scale?.width ?? 1.0
+        var scaleY: CGFloat = appearance.scale?.height ?? 1.0
+        let frameWidth = max(frameSize.width, 1)
+        let frameHeight = max(frameSize.height, 1)
+        let tileScalar = CGFloat(tileSize)
+
+        if let heightTiles = appearance.heightInTiles {
+            let targetHeight = CGFloat(heightTiles) * tileScalar
+            let factor = targetHeight / frameHeight
+            scaleY = factor
+            if appearance.lockAspect && appearance.scale?.width == nil && appearance.widthInTiles == nil {
+                scaleX = factor
+            }
+        }
+
+        if let widthTiles = appearance.widthInTiles {
+            let targetWidth = CGFloat(widthTiles) * tileScalar
+            let factor = targetWidth / frameWidth
+            scaleX = factor
+            if appearance.lockAspect && appearance.scale?.height == nil && appearance.heightInTiles == nil {
+                scaleY = factor
+            }
+        }
+
+        let scaledWidth = max(frameWidth * scaleX, 1)
+        let scaledHeight = max(frameHeight * scaleY, 1)
+        return CGSize(width: scaledWidth, height: scaledHeight)
+    }
+
+    func updateCharacterPhysics(colliderID: ColliderID, visualSize: CGSize) {
+        guard colliderID == player.id else { return }
+        let width = Double(max(visualSize.width, 1))
+        let height = Double(max(visualSize.height, 1))
+        if abs(lastAppliedVisualSize.width - visualSize.width) < 0.1 && abs(lastAppliedVisualSize.height - visualSize.height) < 0.1 {
+            return
+        }
+        lastAppliedVisualSize = visualSize
+        player.setBodyDimensions(width: width, height: height)
     }
 
     struct PlayerDebugSnapshot: Identifiable {
@@ -343,6 +433,8 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         let width: Double
         let ownerID: UUID
         let progress: Double
+        let direction: Vec2
+        let length: Double
     }
 
     func sentrySnapshots() -> [SentrySnapshot] {
@@ -375,13 +467,18 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     func laserSnapshots() -> [LaserSnapshot] {
         laserStates.compactMap { laser in
             guard laser.age <= laser.duration else { return nil }
+            let vector = laser.end - laser.origin
+            let length = vector.length
+            let direction = length > 0 ? vector / length : Vec2(1, 0)
             return LaserSnapshot(
                 id: laser.id,
                 origin: laser.origin,
                 end: laser.end,
                 width: laser.width,
                 ownerID: laser.ownerID,
-                progress: laser.age / max(laser.duration, 0.0001)
+                progress: laser.age / max(laser.duration, 0.0001),
+                direction: direction,
+                length: length
             )
         }
     }
@@ -734,4 +831,3 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         return AABB(min: min, max: max)
     }
 }
-

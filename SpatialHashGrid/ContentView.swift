@@ -10,7 +10,7 @@ import SwiftUI
 struct ContentView: View {
     var body: some View {
         MapEditorView()
-            .frame(minWidth: 900, minHeight: 600)
+//            .frame(minWidth: 900, minHeight: 600)
     }
 }
 

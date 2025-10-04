@@ -8,6 +8,15 @@ final class CharacterController {
     let world: PhysicsWorld
     let id: ColliderID
 
+    enum MovementPhase {
+        case idle
+        case run
+        case jump
+        case fall
+        case wallSlide
+        case land
+    }
+
     // Physical tuning
     var width: Double = 28
     var height: Double = 60
@@ -30,6 +39,8 @@ final class CharacterController {
     private var suppressPlatformCarry: Bool = false
     var wasGroundedLastFrame: Bool = false
     var facing: Int = 1 // 1 right, -1 left
+    private(set) var movementPhase: MovementPhase = .idle
+    private var landStateTimer: Double = 0
 
     init(world: PhysicsWorld, spawn: Vec2) {
         self.world = world
@@ -188,24 +199,103 @@ final class CharacterController {
         // Clamp post-integration fall speed
         if body.velocity.y > maxFallSpeed { body.velocity.y = maxFallSpeed }
 
+        let grounded = collisions.grounded
+        let justLanded = grounded && !wasGroundedLastFrame
+
         if performedJump {
             wasGroundedLastFrame = false
         } else {
-            wasGroundedLastFrame = collisions.grounded
+            wasGroundedLastFrame = grounded
         }
 
-        if collisions.grounded, let pid = collisions.onPlatform {
+        if grounded, let pid = collisions.onPlatform {
             if !performedJump { suppressPlatformCarry = false }
             lastPlatformID = pid
         } else if !performedJump {
             lastPlatformID = nil
         }
 
+        if performedJump {
+            landStateTimer = 0
+        } else if justLanded {
+            landStateTimer = 0.16
+        } else {
+            landStateTimer = max(0, landStateTimer - dt)
+        }
+
+        movementPhase = resolveMovementPhase(
+            grounded: grounded,
+            performedJump: performedJump
+        )
+
         // Push world collider to dynamic grid
+        pushColliderState()
+    }
+
+    func setBodyDimensions(width: Double, height: Double) {
+        let clampedWidth = max(4.0, width)
+        let clampedHeight = max(4.0, height)
+        self.width = clampedWidth
+        self.height = clampedHeight
+        let previousHalf = body.size
+        let previousBottom = body.position.y + previousHalf.y
+        let half = Vec2(clampedWidth * 0.5, clampedHeight * 0.5)
+        body.size = half
+        body.capsuleRadius = min(half.x, half.y)
+        body.position.y = previousBottom - half.y
+        pushColliderState()
+    }
+
+    private func pushColliderState() {
+        let half = body.size
         let aabb = AABB(
-            min: Vec2(body.position.x - body.size.x, body.position.y - body.size.y),
-            max: Vec2(body.position.x + body.size.x, body.position.y + body.size.y)
+            min: Vec2(body.position.x - half.x, body.position.y - half.y),
+            max: Vec2(body.position.x + half.x, body.position.y + half.y)
         )
         world.updateColliderAABB(id: id, newAABB: aabb)
+    }
+
+    private func resolveMovementPhase(grounded: Bool, performedJump: Bool) -> MovementPhase {
+        if performedJump {
+            return .jump
+        }
+        if landStateTimer > 0 && grounded {
+            return .land
+        }
+
+        if grounded {
+            let horizontalSpeed = abs(body.velocity.x)
+            let runThreshold = moveSpeed * 0.1
+            return horizontalSpeed > runThreshold ? .run : .idle
+        }
+
+        let vy = body.velocity.y
+        if (collisions.wallLeft || collisions.wallRight) && vy > 0 {
+            return .wallSlide
+        }
+        if vy < -80 {
+            return .jump
+        }
+        return .fall
+    }
+}
+
+extension CharacterController {
+    struct MovementSnapshot {
+        let position: Vec2
+        let velocity: Vec2
+        let grounded: Bool
+        let facing: Int
+        let phase: MovementPhase
+    }
+
+    func movementSnapshot() -> MovementSnapshot {
+        MovementSnapshot(
+            position: body.position,
+            velocity: body.velocity,
+            grounded: collisions.grounded,
+            facing: facing,
+            phase: movementPhase
+        )
     }
 }

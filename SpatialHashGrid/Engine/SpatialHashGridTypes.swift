@@ -40,3 +40,30 @@ public struct AABB: Equatable, Hashable {
               max: .init(center.x + radius, center.y + radius))
     }
 }
+
+// MARK: - Vec2 Helpers
+
+public extension Vec2 {
+    var length: Double { simd_length(self) }
+
+    var lengthSquared: Double { simd_length_squared(self) }
+
+    var normalized: Vec2 {
+        let len = length
+        guard len > 0 else { return .zero }
+        return Vec2(self.x / len, self.y / len)
+    }
+
+    var normalizedOrZero: Vec2 {
+        let len = length
+        guard len > 1e-9 else { return .zero }
+        return Vec2(self.x / len, self.y / len)
+    }
+}
+
+public func lerp(_ a: Vec2, _ b: Vec2, t: Double) -> Vec2 {
+    Vec2(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t
+    )
+}

@@ -62,14 +62,20 @@ let hits = grid.query(aabb: AABB(min: .init(-0.5, -0.5), max: .init(0.5, 0.5)))
 
 ## Demo AI additions
 
-The SwiftUI/SpriteKit demos now include a configurable enemy sandbox powered by
+The SwiftUI/Metal demos now include a configurable enemy sandbox powered by
 `EnemyController`. Each enemy exposes three tuning surfaces:
 
 - **Movement pattern**: horizontal/vertical patrols, perimeter crawls around a bounding box, or waypoint lists.
 - **Behaviour profile**: passive sentries, hunters that chase once they see the player, cowards that sprint away, and ranged units that strafe while keeping optimal distance.
 - **Attack style**: ranged shooting, sword swipes, or close punches — each with configurable reach, cooldowns, and knockback.
 
-See `SpatialHashGrid/EnemyController.swift` and the SpriteKit preview runtime for concrete wiring examples.
+See `SpatialHashGrid/EnemyController.swift` and the Metal preview runtime for concrete wiring examples.
+
+## Metal texture management & animation controller
+
+`MetalTextureManager` uploads tile and animation imagery into GPU textures on demand. Register tiles with `TextureIdentifier.tile(_:)` and animation frames with `TextureIdentifier.character(_:animation:frame:)`, then call `prepareLibraryIfNeeded(device:)` once the renderer has a `MTLDevice`. `MetalRenderConfiguration` wires those assets into the Metal preview: static tiles collapse to batches of textured quads, while `MetalAnimationController` swaps between idle/run/jump/fall/wall-slide/land clips based on the `CharacterController.MovementPhase`. Provide custom clips by seeding `characterDescriptors` with `SpriteAnimationClip` sequences; the preview falls back to a generated solid-colour texture when no media is registered and exposes optional Spine rigs when the runtime library is present.
+
+Character appearances can now specify either explicit X/Y scales or tile-relative dimensions via `CharacterVisualOptions`. The ninja demo clamps height to 1.9 tiles while preserving aspect, and the physics capsule resizes with the active animation frame so visuals and collisions stay in sync.
 
 ## Map editor refresh
 

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`SpatialHashGrid/` hosts both the SwiftUI shell and the reusable grid engine. Core types and algorithms live in `SpatialHashGrid.swift`; authoring flows sit in `MapEditorView.swift` and the SpriteKit preview runtime. Keep engine changes isolated from UI tweaks whenever possible. `SpatialHashGridTests/` carries the logic suite built with the Swift Testing package (`import Testing`). Group related checks inside a single `@Suite` and share fixtures through private helpers at the top of the file. `SpatialHashGridUITests/` retains the generated XCTest smoke tests; prune or extend them depending on how much UI coverage you need. Long-form writeups belong in `Docs/`; link to them from headers instead of expanding inline comments.
+`SpatialHashGrid/` hosts both the SwiftUI shell and the reusable grid engine. Core types and algorithms live in `SpatialHashGrid.swift`; authoring flows sit in `MapEditorView.swift` and the Metal preview runtime. Keep engine changes isolated from UI tweaks whenever possible. `SpatialHashGridTests/` carries the logic suite built with the Swift Testing package (`import Testing`). Group related checks inside a single `@Suite` and share fixtures through private helpers at the top of the file. `SpatialHashGridUITests/` retains the generated XCTest smoke tests; prune or extend them depending on how much UI coverage you need. Long-form writeups belong in `Docs/`; link to them from headers instead of expanding inline comments.
 
 ## Build, Test, and Development Commands
 Open `SpatialHashGrid.xcodeproj` in Xcode 16+ targeting the iOS simulator. From the CLI, a full debug build runs via:

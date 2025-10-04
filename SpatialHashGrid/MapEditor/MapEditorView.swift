@@ -11,40 +11,48 @@ struct MapEditorView: View {
     @State private var input = InputController()
     @FocusState private var focused: Bool
 
-    private let adapter = SpriteKitLevelPreviewAdapter()
+    private let adapter = MetalLevelPreviewAdapter()
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            HStack(alignment: .top, spacing: 16) {
-                ScrollView(.vertical, showsIndicators: true) {
-                    controls
-                        .padding(.vertical, 16)
-                        .padding(.horizontal, 12)
-                        .frame(maxWidth: .infinity, alignment: .top)
+            if isPreviewing {
+                adapter.makePreview(for: viewModel.blueprint, input: input) {
+                    isPreviewing = false
+                    focusEditor()
                 }
-                .frame(minWidth: 300, maxHeight: .infinity)
-                .background(.thinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                mapStage
-                    .frame(minWidth: 520, minHeight: 520)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .ignoresSafeArea()
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    ScrollView(.vertical, showsIndicators: true) {
+                        controls
+                            .padding(.vertical, 16)
+                            .padding(.horizontal, 12)
+                            .frame(maxWidth: .infinity, alignment: .top)
+                    }
+                    .frame(minWidth: 300, maxHeight: .infinity)
+                    .background(.thinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    
+                    mapStage
+                        .frame(minWidth: 520, minHeight: 520)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                
+                floatingControls
+                    .padding(20)
             }
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            floatingControls
-                .padding(20)
         }
-        .sheet(isPresented: $isPreviewing) {
-            adapter.makePreview(for: viewModel.blueprint, input: input) {
-                isPreviewing = false
-                focusEditor()
-            }
-            .ignoresSafeArea()
-        }
+//        .sheet(isPresented: $isPreviewing) {
+//            adapter.makePreview(for: viewModel.blueprint, input: input) {
+//                isPreviewing = false
+//                focusEditor()
+//            }
+//            .ignoresSafeArea()
+//        }
         .onChange(of: viewModel.selectedSpawnID) {
             spawnNameDraft = viewModel.selectedSpawn?.name ?? ""
         }
