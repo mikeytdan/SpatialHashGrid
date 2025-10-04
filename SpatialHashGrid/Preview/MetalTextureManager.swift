@@ -45,31 +45,27 @@ final class MetalTextureManager {
         appendTexture(id: .tile(kind), source: .cgImage(image), pivot: pivot, group: nil)
     }
 
+    func registerTile(kind: LevelTileKind, image: PlatformImage, pivot: CGPoint? = nil) {
+        registerTile(kind: kind, image: image.cgImage, pivot: pivot)
+    }
+
     #if canImport(UIKit)
     func registerTile(kind: LevelTileKind, image: UIImage, pivot: CGPoint? = nil) {
-        guard let cgImage = image.cgImage else { return }
-        registerTile(kind: kind, image: cgImage, pivot: pivot)
+        guard let wrapped = PlatformImage(image) else { return }
+        registerTile(kind: kind, image: wrapped, pivot: pivot)
     }
 
-    func registerTile(kind: LevelTileKind, imageNamed name: String, in bundle: Bundle = .main, pivot: CGPoint? = nil) {
-        guard let image = UIImage(named: name, in: bundle, compatibleWith: nil), let cgImage = image.cgImage else { return }
-        registerTile(kind: kind, image: cgImage, pivot: pivot)
-    }
     #elseif canImport(AppKit) && !targetEnvironment(macCatalyst)
     func registerTile(kind: LevelTileKind, image: NSImage, pivot: CGPoint? = nil) {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-        registerTile(kind: kind, image: cgImage, pivot: pivot)
-    }
-
-    func registerTile(kind: LevelTileKind, imageNamed name: String, in bundle: Bundle = .main, pivot: CGPoint? = nil) {
-        guard
-            let url = bundle.url(forResource: name, withExtension: nil),
-            let image = NSImage(contentsOf: url),
-            let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        else { return }
-        registerTile(kind: kind, image: cgImage, pivot: pivot)
+        guard let wrapped = PlatformImage(image) else { return }
+        registerTile(kind: kind, image: wrapped, pivot: pivot)
     }
     #endif
+
+    func registerTile(kind: LevelTileKind, imageNamed name: String, in bundle: Bundle = .main, pivot: CGPoint? = nil) {
+        guard let image = PlatformImage(named: name, in: bundle) else { return }
+        registerTile(kind: kind, image: image, pivot: pivot)
+    }
 
     func registerAnimationFrames(
         character name: String,
@@ -84,6 +80,16 @@ final class MetalTextureManager {
         }
     }
 
+    func registerAnimationFrames(
+        character name: String,
+        animation: String,
+        images: [PlatformImage],
+        pivot: CGPoint? = nil
+    ) {
+        let cgImages = images.map { $0.cgImage }
+        registerAnimationFrames(character: name, animation: animation, images: cgImages, pivot: pivot)
+    }
+
     #if canImport(UIKit)
     func registerAnimationFrames(
         character name: String,
@@ -91,20 +97,10 @@ final class MetalTextureManager {
         images: [UIImage],
         pivot: CGPoint? = nil
     ) {
-        let cgImages = images.compactMap { $0.cgImage }
-        registerAnimationFrames(character: name, animation: animation, images: cgImages, pivot: pivot)
+        let wrapped = images.compactMap { PlatformImage($0) }
+        registerAnimationFrames(character: name, animation: animation, images: wrapped, pivot: pivot)
     }
 
-    func registerAnimationFrames(
-        character name: String,
-        animation: String,
-        imageNames: [String],
-        in bundle: Bundle = .main,
-        pivot: CGPoint? = nil
-    ) {
-        let cgImages = imageNames.compactMap { UIImage(named: $0, in: bundle, compatibleWith: nil)?.cgImage }
-        registerAnimationFrames(character: name, animation: animation, images: cgImages, pivot: pivot)
-    }
     #elseif canImport(AppKit) && !targetEnvironment(macCatalyst)
     func registerAnimationFrames(
         character name: String,
@@ -112,9 +108,10 @@ final class MetalTextureManager {
         images: [NSImage],
         pivot: CGPoint? = nil
     ) {
-        let cgImages = images.compactMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
-        registerAnimationFrames(character: name, animation: animation, images: cgImages, pivot: pivot)
+        let wrapped = images.compactMap { PlatformImage($0) }
+        registerAnimationFrames(character: name, animation: animation, images: wrapped, pivot: pivot)
     }
+    #endif
 
     func registerAnimationFrames(
         character name: String,
@@ -123,17 +120,9 @@ final class MetalTextureManager {
         in bundle: Bundle = .main,
         pivot: CGPoint? = nil
     ) {
-        let cgImages: [CGImage] = imageNames.compactMap { fileName in
-            guard
-                let url = bundle.url(forResource: fileName, withExtension: nil),
-                let image = NSImage(contentsOf: url),
-                let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-            else { return nil }
-            return cgImage
-        }
-        registerAnimationFrames(character: name, animation: animation, images: cgImages, pivot: pivot)
+        let images = imageNames.compactMap { PlatformImage(named: $0, in: bundle) }
+        registerAnimationFrames(character: name, animation: animation, images: images, pivot: pivot)
     }
-    #endif
 
     func registerImage(data: Data, identifier: TextureIdentifier, pivot: CGPoint? = nil) {
         appendTexture(id: identifier, source: .data(data), pivot: pivot, group: nil)

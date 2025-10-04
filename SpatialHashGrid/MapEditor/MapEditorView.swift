@@ -36,7 +36,7 @@ struct MapEditorView: View {
                     mapStage
                         .frame(minWidth: 520, minHeight: 520)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color(.secondarySystemBackground))
+                        .background(PlatformColors.secondaryBackground)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .padding()
@@ -700,7 +700,7 @@ struct MapEditorView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
-                        .background(viewModel.tool == tool ? Color.accentColor.opacity(0.2) : Color(.secondarySystemBackground))
+                        .background(viewModel.tool == tool ? Color.accentColor.opacity(0.2) : PlatformColors.secondaryBackground)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                     .buttonStyle(.plain)

@@ -264,7 +264,7 @@ private struct MetalPreviewRepresentable: UIViewRepresentable {
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         view.colorPixelFormat = .bgra8Unorm
         view.framebufferOnly = false
-        view.preferredFramesPerSecond = 60
+        PlatformDisplayUtilities.configureFrameRate(for: view, preferredFramesPerSecond: 60)
         renderer.configure(
             view: view,
             runtime: runtime,
@@ -302,7 +302,7 @@ private struct MetalPreviewRepresentable: NSViewRepresentable {
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         view.colorPixelFormat = .bgra8Unorm
         view.framebufferOnly = false
-        view.preferredFramesPerSecond = 60
+        PlatformDisplayUtilities.configureFrameRate(for: view, preferredFramesPerSecond: 60)
         renderer.configure(
             view: view,
             runtime: runtime,

@@ -1,26 +1,25 @@
 import Combine
 import SwiftUI
+import QuartzCore
 import simd
 
 // MARK: - DisplayLink (steady ticks, low overhead)
 @MainActor
 final class DisplayLinkDriver: ObservableObject {
     @Published var timestamp: CFTimeInterval = CACurrentMediaTime()
-    private var link: CADisplayLink?
+    private var link: PlatformDisplayLink?
 
     func start() {
-        guard link == nil else { return }
-        link = CADisplayLink(target: self, selector: #selector(tick))
-        if #available(iOS 15.0, *) {
-            link?.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
-        } else {
-            link?.preferredFramesPerSecond = 60
+        if link == nil {
+            link = PlatformDisplayLink { [weak self] timestamp in
+                self?.timestamp = timestamp
+            }
         }
-        link?.add(to: .main, forMode: .common)
+        link?.start()
     }
-    func stop() { link?.invalidate(); link = nil }
-
-    @objc private func tick(_ dl: CADisplayLink) { timestamp = dl.timestamp }
+    func stop() {
+        link?.stop()
+    }
 }
 
 // MARK: - Model

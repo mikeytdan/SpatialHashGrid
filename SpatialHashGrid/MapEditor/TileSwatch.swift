@@ -14,7 +14,7 @@ struct TileSwatch: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(.secondarySystemBackground))
+                .fill(PlatformColors.secondaryBackground)
 
             Canvas { context, size in
                 let rect = CGRect(origin: .zero, size: size).insetBy(dx: 6, dy: 6)
