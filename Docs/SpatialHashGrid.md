@@ -69,7 +69,7 @@ The SwiftUI/SpriteKit demos now include a configurable enemy sandbox powered by
 - **Behaviour profile**: passive sentries, hunters that chase once they see the player, cowards that sprint away, and ranged units that strafe while keeping optimal distance.
 - **Attack style**: ranged shooting, sword swipes, or close punches — each with configurable reach, cooldowns, and knockback.
 
-See `SpatialHashGrid/EnemyController.swift` and `SpatialHashGrid/GameDemoView.swift` for concrete wiring examples.
+See `SpatialHashGrid/EnemyController.swift` and the SpriteKit preview runtime for concrete wiring examples.
 
 ## Map editor refresh
 
