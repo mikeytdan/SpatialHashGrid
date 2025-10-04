@@ -282,9 +282,9 @@ final class PhysicsWorld {
 
 // MARK: - Helpers
 
-private enum Axis { case x, y }
+enum Axis { case x, y }
 
-private extension PhysicsWorld {
+extension PhysicsWorld {
     func makeAABB(position: Vec2, halfSize: Vec2) -> AABB {
         AABB(
             min: Vec2(position.x - halfSize.x, position.y - halfSize.y),
