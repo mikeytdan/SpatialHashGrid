@@ -16,6 +16,7 @@ final class MapEditorViewModel: ObservableObject {
         case spawn
         case platform
         case sentry
+        case enemy
 
         var id: Tool { self }
 
@@ -31,6 +32,7 @@ final class MapEditorViewModel: ObservableObject {
             case .spawn: return "Spawn"
             case .platform: return "Platform"
             case .sentry: return "Sentry"
+            case .enemy: return "Enemy"
             }
         }
 
@@ -46,6 +48,7 @@ final class MapEditorViewModel: ObservableObject {
             case .spawn: return "figure.walk"
             case .platform: return "rectangle.3.group"
             case .sentry: return "dot.radiowaves.right"
+            case .enemy: return "figure.walk"
             }
         }
     }
@@ -64,6 +67,62 @@ final class MapEditorViewModel: ObservableObject {
         }
     }
 
+    enum EnemyMovementChoice: String, CaseIterable, Identifiable {
+        case idle
+        case patrolHorizontal
+        case patrolVertical
+        case perimeter
+        case wallBounce
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .idle: return "Idle"
+            case .patrolHorizontal: return "Patrol Horizontal"
+            case .patrolVertical: return "Patrol Vertical"
+            case .perimeter: return "Perimeter"
+            case .wallBounce: return "Wall Bounce"
+            }
+        }
+    }
+
+    enum EnemyBehaviorChoice: String, CaseIterable, Identifiable {
+        case passive
+        case chase
+        case flee
+        case strafe
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .passive: return "Passive"
+            case .chase: return "Chase"
+            case .flee: return "Flee"
+            case .strafe: return "Strafe & Shoot"
+            }
+        }
+    }
+
+    enum EnemyAttackChoice: String, CaseIterable, Identifiable {
+        case none
+        case shooter
+        case sword
+        case punch
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .none: return "None"
+            case .shooter: return "Shooter"
+            case .sword: return "Sword"
+            case .punch: return "Punch"
+            }
+        }
+    }
+
     @Published var blueprint: LevelBlueprint
     @Published var showGrid: Bool = true
     @Published var tool: Tool = .pencil
@@ -72,6 +131,7 @@ final class MapEditorViewModel: ObservableObject {
     @Published var selectedSpawnID: PlayerSpawnPoint.ID?
     @Published var selectedPlatformID: MovingPlatformBlueprint.ID?
     @Published var selectedSentryID: SentryBlueprint.ID?
+    @Published var selectedEnemyID: EnemyBlueprint.ID?
     @Published var hoveredPoint: GridPoint?
     @Published var shapePreview: Set<GridPoint> = []
     @Published var zoom: Double = 1.0
@@ -83,6 +143,7 @@ final class MapEditorViewModel: ObservableObject {
     private var redoStack: [LevelBlueprint] = []
     private var platformDragContext: PlatformDragContext?
     private var sentryDragID: SentryBlueprint.ID?
+    private var enemyDragID: EnemyBlueprint.ID?
 
     private struct PlatformMoveContext {
         let platformID: MovingPlatformBlueprint.ID
@@ -127,6 +188,11 @@ final class MapEditorViewModel: ObservableObject {
         return blueprint.sentry(id: id)
     }
 
+    var selectedEnemy: EnemyBlueprint? {
+        guard let id = selectedEnemyID else { return nil }
+        return blueprint.enemy(id: id)
+    }
+
     var tilePalette: [LevelTileKind] { LevelTileKind.palette }
 
     var paintTileKind: LevelTileKind {
@@ -156,8 +222,10 @@ final class MapEditorViewModel: ObservableObject {
         syncSelectedSpawn()
         syncSelectedPlatform()
         syncSelectedSentry()
+        syncSelectedEnemy()
         platformDragContext = nil
         sentryDragID = nil
+        enemyDragID = nil
     }
 
     func fillGround() {
@@ -312,6 +380,463 @@ final class MapEditorViewModel: ObservableObject {
             ref.initialFacingDegrees = clamped
         }
         syncSelectedSentry()
+    }
+
+    func selectEnemy(_ enemy: EnemyBlueprint) {
+        selectedEnemyID = enemy.id
+        tool = .enemy
+    }
+
+    func addEnemyAtCenter() {
+        let point = GridPoint(row: blueprint.rows / 2, column: blueprint.columns / 2)
+        if let created = insertEnemy(at: point) {
+            selectedEnemyID = created.id
+            tool = .enemy
+        }
+    }
+
+    func removeSelectedEnemy() {
+        guard let enemy = selectedEnemy else { return }
+        removeEnemy(enemy)
+    }
+
+    func removeEnemy(_ enemy: EnemyBlueprint) {
+        captureSnapshot()
+        blueprint.removeEnemy(id: enemy.id)
+        syncSelectedEnemy()
+    }
+
+    func duplicateSelectedEnemy() {
+        guard let enemy = selectedEnemy else { return }
+        guard let destination = findVacantEnemyCoordinate(near: enemy.coordinate) else { return }
+        var duplicate = enemy
+        duplicate.coordinate = destination
+        duplicate.id = UUID()
+        captureSnapshot()
+        if let created = blueprint.addEnemy(duplicate) {
+            selectedEnemyID = created.id
+            syncSelectedEnemy()
+        }
+    }
+
+    var selectedEnemyMovementChoice: EnemyMovementChoice {
+        guard let enemy = selectedEnemy else { return .idle }
+        switch enemy.movement {
+        case .idle: return .idle
+        case .patrolHorizontal: return .patrolHorizontal
+        case .patrolVertical: return .patrolVertical
+        case .perimeter: return .perimeter
+        case .waypoints: return .patrolHorizontal
+        case .wallBounce: return .wallBounce
+        }
+    }
+
+    func setSelectedEnemyMovementChoice(_ choice: EnemyMovementChoice) {
+        mutateSelectedEnemy { ref in
+            switch choice {
+            case .idle:
+                ref.movement = .idle
+            case .patrolHorizontal:
+                ref.movement = .patrolHorizontal(span: 120, speed: 100)
+            case .patrolVertical:
+                ref.movement = .patrolVertical(span: 120, speed: 100)
+            case .perimeter:
+                ref.movement = .perimeter(width: 160, height: 120, speed: 110, clockwise: true)
+            case .wallBounce:
+                ref.movement = .wallBounce(axis: .horizontal, speed: 160)
+            }
+        }
+    }
+
+    var selectedEnemyBehaviorChoice: EnemyBehaviorChoice {
+        guard let enemy = selectedEnemy else { return .passive }
+        switch enemy.behavior {
+        case .passive: return .passive
+        case .chase: return .chase
+        case .flee: return .flee
+        case .strafe: return .strafe
+        }
+    }
+
+    func setSelectedEnemyBehaviorChoice(_ choice: EnemyBehaviorChoice) {
+        mutateSelectedEnemy { ref in
+            switch choice {
+            case .passive:
+                ref.behavior = .passive
+            case .chase:
+                ref.behavior = .chase(range: 320, speedMultiplier: 1.35, verticalTolerance: 180)
+            case .flee:
+                ref.behavior = .flee(range: 280, safeDistance: 220, runMultiplier: 1.8)
+            case .strafe:
+                ref.behavior = .strafe(range: 360, preferred: 140...260, strafeSpeed: 140)
+            }
+        }
+    }
+
+    var selectedEnemyAttackChoice: EnemyAttackChoice {
+        guard let enemy = selectedEnemy else { return .none }
+        switch enemy.attack {
+        case .none: return .none
+        case .shooter: return .shooter
+        case .sword: return .sword
+        case .punch: return .punch
+        }
+    }
+
+    func setSelectedEnemyAttackChoice(_ choice: EnemyAttackChoice) {
+        mutateSelectedEnemy { ref in
+            switch choice {
+            case .none:
+                ref.attack = .none
+            case .shooter:
+                ref.attack = .shooter(speed: 420, cooldown: 1.1, range: 420)
+            case .sword:
+                ref.attack = .sword(range: 36, cooldown: 1.0, knockback: 220)
+            case .punch:
+                ref.attack = .punch(range: 32, cooldown: 1.1, knockback: 180)
+            }
+        }
+    }
+
+    func updateSelectedEnemySizeWidth(_ width: Double) {
+        guard let enemy = selectedEnemy else { return }
+        let clamped = max(20, min(width, 160))
+        guard abs(enemy.size.x - clamped) > 0.001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.size.x = clamped
+        }
+    }
+
+    func updateSelectedEnemySizeHeight(_ height: Double) {
+        guard let enemy = selectedEnemy else { return }
+        let clamped = max(20, min(height, 220))
+        guard abs(enemy.size.y - clamped) > 0.001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.size.y = clamped
+        }
+    }
+
+    func updateSelectedEnemyAcceleration(_ acceleration: Double) {
+        guard let enemy = selectedEnemy else { return }
+        let clamped = max(2, min(acceleration, 40))
+        guard abs(enemy.acceleration - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.acceleration = clamped
+        }
+    }
+
+    func updateSelectedEnemyMaxSpeed(_ speed: Double) {
+        guard let enemy = selectedEnemy else { return }
+        let clamped = max(60, min(speed, 600))
+        guard abs(enemy.maxSpeed - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.maxSpeed = clamped
+        }
+    }
+
+    func updateSelectedEnemyGravityEnabled(_ enabled: Bool) {
+        guard let enemy = selectedEnemy else { return }
+        guard enemy.affectedByGravity != enabled else { return }
+        mutateSelectedEnemy { ref in
+            ref.affectedByGravity = enabled
+        }
+    }
+
+    func updateSelectedEnemyGravityScale(_ scale: Double) {
+        guard let enemy = selectedEnemy else { return }
+        let clamped = max(0, min(scale, 2.0))
+        guard abs(enemy.gravityScale - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.gravityScale = clamped
+        }
+    }
+
+    func updateSelectedEnemyHorizontalSpan(_ span: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .patrolHorizontal(let current, let speed) = enemy.movement else { return }
+        let clamped = max(8, min(span, 800))
+        guard abs(current - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .patrolHorizontal(span: clamped, speed: speed)
+        }
+    }
+
+    func updateSelectedEnemyHorizontalSpeed(_ speed: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .patrolHorizontal(let span, let current) = enemy.movement else { return }
+        let clamped = max(10, min(speed, 600))
+        guard abs(current - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .patrolHorizontal(span: span, speed: clamped)
+        }
+    }
+
+    func updateSelectedEnemyVerticalSpan(_ span: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .patrolVertical(let current, let speed) = enemy.movement else { return }
+        let clamped = max(8, min(span, 800))
+        guard abs(current - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .patrolVertical(span: clamped, speed: speed)
+        }
+    }
+
+    func updateSelectedEnemyVerticalSpeed(_ speed: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .patrolVertical(let span, let current) = enemy.movement else { return }
+        let clamped = max(10, min(speed, 600))
+        guard abs(current - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .patrolVertical(span: span, speed: clamped)
+        }
+    }
+
+    func updateSelectedEnemyPerimeterWidth(_ width: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .perimeter(let current, let height, let speed, let clockwise) = enemy.movement else { return }
+        let clamped = max(8, min(width, 800))
+        guard abs(current - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .perimeter(width: clamped, height: height, speed: speed, clockwise: clockwise)
+        }
+    }
+
+    func updateSelectedEnemyPerimeterHeight(_ height: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .perimeter(let width, let current, let speed, let clockwise) = enemy.movement else { return }
+        let clamped = max(8, min(height, 800))
+        guard abs(current - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .perimeter(width: width, height: clamped, speed: speed, clockwise: clockwise)
+        }
+    }
+
+    func updateSelectedEnemyPerimeterSpeed(_ speed: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .perimeter(let width, let height, let current, let clockwise) = enemy.movement else { return }
+        let clamped = max(10, min(speed, 600))
+        guard abs(current - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .perimeter(width: width, height: height, speed: clamped, clockwise: clockwise)
+        }
+    }
+
+    func updateSelectedEnemyPerimeterClockwise(_ clockwise: Bool) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .perimeter(let width, let height, let speed, let currentClockwise) = enemy.movement else { return }
+        guard currentClockwise != clockwise else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .perimeter(width: width, height: height, speed: speed, clockwise: clockwise)
+        }
+    }
+
+    func updateSelectedEnemyWallBounceAxis(_ axis: EnemyController.MovementPattern.Axis) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .wallBounce(let currentAxis, let speed) = enemy.movement else { return }
+        guard currentAxis != axis else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .wallBounce(axis: axis, speed: speed)
+        }
+    }
+
+    func updateSelectedEnemyWallBounceSpeed(_ speed: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .wallBounce(let axis, let currentSpeed) = enemy.movement else { return }
+        let clamped = max(10, min(speed, 600))
+        guard abs(currentSpeed - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.movement = .wallBounce(axis: axis, speed: clamped)
+        }
+    }
+
+    func updateSelectedEnemyChaseRange(_ range: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .chase(let currentRange, let multiplier, let tolerance) = enemy.behavior else { return }
+        let clamped = max(32, min(range, 1600))
+        guard abs(currentRange - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .chase(range: clamped, speedMultiplier: multiplier, verticalTolerance: tolerance)
+        }
+    }
+
+    func updateSelectedEnemyChaseMultiplier(_ multiplier: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .chase(let range, let currentMultiplier, let tolerance) = enemy.behavior else { return }
+        let clamped = max(0.5, min(multiplier, 3.0))
+        guard abs(currentMultiplier - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .chase(range: range, speedMultiplier: clamped, verticalTolerance: tolerance)
+        }
+    }
+
+    func updateSelectedEnemyChaseTolerance(_ tolerance: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .chase(let range, let multiplier, let currentTolerance) = enemy.behavior else { return }
+        let clamped = max(0, min(tolerance, 500))
+        guard abs(currentTolerance - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .chase(range: range, speedMultiplier: multiplier, verticalTolerance: clamped)
+        }
+    }
+
+    func updateSelectedEnemyFleeRange(_ range: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .flee(let currentRange, let safe, let run) = enemy.behavior else { return }
+        let clamped = max(32, min(range, 1600))
+        guard abs(currentRange - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .flee(range: clamped, safeDistance: safe, runMultiplier: run)
+        }
+    }
+
+    func updateSelectedEnemyFleeSafeDistance(_ distance: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .flee(let range, let currentSafe, let run) = enemy.behavior else { return }
+        let clamped = max(16, min(distance, 1600))
+        guard abs(currentSafe - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .flee(range: range, safeDistance: clamped, runMultiplier: run)
+        }
+    }
+
+    func updateSelectedEnemyFleeRunMultiplier(_ multiplier: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .flee(let range, let safe, let currentRun) = enemy.behavior else { return }
+        let clamped = max(0.5, min(multiplier, 3.0))
+        guard abs(currentRun - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .flee(range: range, safeDistance: safe, runMultiplier: clamped)
+        }
+    }
+
+    func updateSelectedEnemyStrafeRange(_ range: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .strafe(let currentRange, let preferred, let speed) = enemy.behavior else { return }
+        let clamped = max(32, min(range, 1600))
+        guard abs(currentRange - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .strafe(range: clamped, preferred: preferred, strafeSpeed: speed)
+        }
+    }
+
+    func updateSelectedEnemyStrafeNearDistance(_ near: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .strafe(let range, let preferred, let speed) = enemy.behavior else { return }
+        let lower = max(16, min(near, preferred.upperBound - 8))
+        guard abs(preferred.lowerBound - lower) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .strafe(range: range, preferred: lower...max(lower + 8, preferred.upperBound), strafeSpeed: speed)
+        }
+    }
+
+    func updateSelectedEnemyStrafeFarDistance(_ far: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .strafe(let range, let preferred, let speed) = enemy.behavior else { return }
+        let upper = max(preferred.lowerBound + 8, min(far, 1600))
+        guard abs(preferred.upperBound - upper) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .strafe(range: range, preferred: preferred.lowerBound...upper, strafeSpeed: speed)
+        }
+    }
+
+    func updateSelectedEnemyStrafeSpeed(_ speed: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .strafe(let range, let preferred, let currentSpeed) = enemy.behavior else { return }
+        let clamped = max(10, min(speed, 400))
+        guard abs(currentSpeed - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.behavior = .strafe(range: range, preferred: preferred, strafeSpeed: clamped)
+        }
+    }
+
+    func updateSelectedEnemyShooterSpeed(_ speed: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .shooter(let currentSpeed, let cooldown, let range) = enemy.attack else { return }
+        let clamped = max(40, min(speed, 900))
+        guard abs(currentSpeed - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .shooter(speed: clamped, cooldown: cooldown, range: range)
+        }
+    }
+
+    func updateSelectedEnemyShooterCooldown(_ cooldown: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .shooter(let speed, let currentCooldown, let range) = enemy.attack else { return }
+        let clamped = max(0.1, min(cooldown, 10))
+        guard abs(currentCooldown - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .shooter(speed: speed, cooldown: clamped, range: range)
+        }
+    }
+
+    func updateSelectedEnemyShooterRange(_ range: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .shooter(let speed, let cooldown, let currentRange) = enemy.attack else { return }
+        let clamped = max(32, min(range, 1600))
+        guard abs(currentRange - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .shooter(speed: speed, cooldown: cooldown, range: clamped)
+        }
+    }
+
+    func updateSelectedEnemySwordRange(_ range: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .sword(let currentRange, let cooldown, let knock) = enemy.attack else { return }
+        let clamped = max(8, min(range, 200))
+        guard abs(currentRange - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .sword(range: clamped, cooldown: cooldown, knockback: knock)
+        }
+    }
+
+    func updateSelectedEnemySwordCooldown(_ cooldown: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .sword(let range, let currentCooldown, let knock) = enemy.attack else { return }
+        let clamped = max(0.1, min(cooldown, 10))
+        guard abs(currentCooldown - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .sword(range: range, cooldown: clamped, knockback: knock)
+        }
+    }
+
+    func updateSelectedEnemySwordKnockback(_ knockback: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .sword(let range, let cooldown, let currentKnock) = enemy.attack else { return }
+        let clamped = max(0, min(knockback, 800))
+        guard abs(currentKnock - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .sword(range: range, cooldown: cooldown, knockback: clamped)
+        }
+    }
+
+    func updateSelectedEnemyPunchRange(_ range: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .punch(let currentRange, let cooldown, let knock) = enemy.attack else { return }
+        let clamped = max(8, min(range, 200))
+        guard abs(currentRange - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .punch(range: clamped, cooldown: cooldown, knockback: knock)
+        }
+    }
+
+    func updateSelectedEnemyPunchCooldown(_ cooldown: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .punch(let range, let currentCooldown, let knock) = enemy.attack else { return }
+        let clamped = max(0.1, min(cooldown, 10))
+        guard abs(currentCooldown - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .punch(range: range, cooldown: clamped, knockback: knock)
+        }
+    }
+
+    func updateSelectedEnemyPunchKnockback(_ knockback: Double) {
+        guard let enemy = selectedEnemy else { return }
+        guard case .punch(let range, let cooldown, let currentKnock) = enemy.attack else { return }
+        let clamped = max(0, min(knockback, 800))
+        guard abs(currentKnock - clamped) > 0.0001 else { return }
+        mutateSelectedEnemy { ref in
+            ref.attack = .punch(range: range, cooldown: cooldown, knockback: clamped)
+        }
     }
 
     func updateSelectedSentrySweepSpeed(_ degreesPerSecond: Double) {
@@ -523,6 +1048,18 @@ final class MapEditorViewModel: ObservableObject {
             sentryDragID = nil
         }
 
+        if tool == .enemy {
+            if let existing = enemy(at: point) {
+                selectedEnemyID = existing.id
+                enemyDragID = existing.id
+            } else if let newEnemy = insertEnemy(at: point) {
+                selectedEnemyID = newEnemy.id
+                enemyDragID = newEnemy.id
+            }
+        } else {
+            enemyDragID = nil
+        }
+
         applyDrag(at: point, isInitial: true)
     }
 
@@ -540,7 +1077,9 @@ final class MapEditorViewModel: ObservableObject {
             syncSelectedSpawn()
             syncSelectedPlatform()
             syncSelectedSentry()
+            syncSelectedEnemy()
             sentryDragID = nil
+            enemyDragID = nil
         }
 
         guard let point else { return }
@@ -564,6 +1103,8 @@ final class MapEditorViewModel: ObservableObject {
             }
         case .sentry:
             break
+        case .enemy:
+            break
         default:
             break
         }
@@ -579,6 +1120,7 @@ final class MapEditorViewModel: ObservableObject {
             model.syncSelectedSpawn()
             model.syncSelectedPlatform()
             model.syncSelectedSentry()
+            model.syncSelectedEnemy()
         }
     }
 
@@ -590,6 +1132,7 @@ final class MapEditorViewModel: ObservableObject {
             model.syncSelectedSpawn()
             model.syncSelectedPlatform()
             model.syncSelectedSentry()
+            model.syncSelectedEnemy()
         }
     }
 
@@ -599,6 +1142,10 @@ final class MapEditorViewModel: ObservableObject {
 
     func platformColor(for index: Int) -> Color {
         PlatformPalette.color(for: index)
+    }
+
+    func enemyColor(for index: Int) -> Color {
+        EnemyPalette.color(for: index)
     }
 
     private func applyDrag(at point: GridPoint, isInitial: Bool) {
@@ -631,6 +1178,8 @@ final class MapEditorViewModel: ObservableObject {
             }
         case .sentry:
             moveSentry(to: point, isInitial: isInitial)
+        case .enemy:
+            moveEnemy(to: point, isInitial: isInitial)
         }
     }
 
@@ -696,6 +1245,20 @@ final class MapEditorViewModel: ObservableObject {
             if let newSentry = insertSentry(at: point) {
                 selectedSentryID = newSentry.id
                 sentryDragID = newSentry.id
+            }
+        }
+    }
+
+    private func moveEnemy(to point: GridPoint, isInitial: Bool) {
+        guard blueprint.contains(point) else { return }
+        if let dragID = enemyDragID, blueprint.enemy(id: dragID) != nil {
+            blueprint.updateEnemy(id: dragID) { ref in
+                ref.coordinate = point
+            }
+        } else if isInitial {
+            if let newEnemy = insertEnemy(at: point) {
+                selectedEnemyID = newEnemy.id
+                enemyDragID = newEnemy.id
             }
         }
     }
@@ -878,6 +1441,27 @@ final class MapEditorViewModel: ObservableObject {
         selectedSpawnID = blueprint.spawnPoints.first?.id
     }
 
+    private func syncSelectedPlatform() {
+        if let id = selectedPlatformID, blueprint.movingPlatform(id: id) != nil {
+            return
+        }
+        selectedPlatformID = blueprint.movingPlatforms.first?.id
+    }
+
+    private func syncSelectedSentry() {
+        if let id = selectedSentryID, blueprint.sentry(id: id) != nil {
+            return
+        }
+        selectedSentryID = blueprint.sentries.first?.id
+    }
+
+    private func syncSelectedEnemy() {
+        if let id = selectedEnemyID, blueprint.enemy(id: id) != nil {
+            return
+        }
+        selectedEnemyID = blueprint.enemies.first?.id
+    }
+
     @discardableResult
     private func insertSpawn(at point: GridPoint) -> PlayerSpawnPoint? {
         let spawn = blueprint.addSpawnPoint(at: point)
@@ -901,6 +1485,20 @@ final class MapEditorViewModel: ObservableObject {
         return sentry
     }
 
+    @discardableResult
+    private func insertEnemy(at point: GridPoint) -> EnemyBlueprint? {
+        guard let enemy = blueprint.addEnemy(at: point) else { return nil }
+        syncSelectedEnemy()
+        return enemy
+    }
+
+    private func mutateSelectedEnemy(_ mutate: (inout EnemyBlueprint) -> Void) {
+        guard let enemy = selectedEnemy else { return }
+        captureSnapshot()
+        blueprint.updateEnemy(id: enemy.id, mutate: mutate)
+        syncSelectedEnemy()
+    }
+
     func platformTargetRowRange(_ platform: MovingPlatformBlueprint) -> ClosedRange<Int> {
         let maxRow = max(0, blueprint.rows - platform.size.rows)
         return 0...maxRow
@@ -920,6 +1518,10 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.sentry(at: point)
     }
 
+    func enemy(at point: GridPoint) -> EnemyBlueprint? {
+        blueprint.enemy(at: point)
+    }
+
     private func findVacantSentryCoordinate(near point: GridPoint) -> GridPoint? {
         let limit = max(1, max(blueprint.rows, blueprint.columns))
         for radius in 1...limit {
@@ -929,6 +1531,23 @@ final class MapEditorViewModel: ObservableObject {
                     let candidate = point.offsetting(rowDelta: row, columnDelta: col)
                     guard blueprint.contains(candidate) else { continue }
                     if blueprint.sentry(at: candidate) == nil {
+                        return candidate
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func findVacantEnemyCoordinate(near point: GridPoint) -> GridPoint? {
+        let limit = max(1, max(blueprint.rows, blueprint.columns))
+        for radius in 1...limit {
+            for row in -radius...radius {
+                for col in -radius...radius {
+                    if max(abs(row), abs(col)) != radius { continue }
+                    let candidate = point.offsetting(rowDelta: row, columnDelta: col)
+                    guard blueprint.contains(candidate) else { continue }
+                    if blueprint.enemy(at: candidate) == nil {
                         return candidate
                     }
                 }
@@ -985,20 +1604,6 @@ final class MapEditorViewModel: ObservableObject {
         return min(max(desired, range.lowerBound), range.upperBound)
     }
 
-    private func syncSelectedPlatform() {
-        if let id = selectedPlatformID, blueprint.movingPlatform(id: id) != nil {
-            return
-        }
-        selectedPlatformID = blueprint.movingPlatforms.first?.id
-    }
-
-    private func syncSelectedSentry() {
-        if let id = selectedSentryID, blueprint.sentry(id: id) != nil {
-            return
-        }
-        selectedSentryID = blueprint.sentries.first?.id
-    }
-
     private func scheduleMutation(_ mutation: @escaping (MapEditorViewModel) -> Void) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1008,6 +1613,10 @@ final class MapEditorViewModel: ObservableObject {
 }
 
 struct MapEditorView: View {
+    private typealias EnemyMovementChoice = MapEditorViewModel.EnemyMovementChoice
+    private typealias EnemyBehaviorChoice = MapEditorViewModel.EnemyBehaviorChoice
+    private typealias EnemyAttackChoice = MapEditorViewModel.EnemyAttackChoice
+
     @StateObject private var viewModel = MapEditorViewModel()
     @State private var isPreviewing = false
     @State private var spawnNameDraft: String = ""
@@ -1094,6 +1703,7 @@ struct MapEditorView: View {
             selectedSpawnID: viewModel.selectedSpawnID,
             selectedPlatformID: viewModel.selectedPlatformID,
             selectedSentryID: viewModel.selectedSentryID,
+            selectedEnemyID: viewModel.selectedEnemyID,
             previewColor: viewModel.paintTileKind.fillColor,
             hoveredPoint: viewModel.hoveredPoint,
             onHover: viewModel.updateHover,
@@ -1111,12 +1721,517 @@ struct MapEditorView: View {
             toolsSection
             drawModeSection
             canvasControls
+            enemySection
             sentrySection
             platformSection
             spawnSection
             quickActions
             Spacer(minLength: 24)
         }
+    }
+
+    private var enemySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Enemies")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    viewModel.tool = .enemy
+                } label: {
+                    Label("Enemy Tool", systemImage: "figure.walk")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    viewModel.addEnemyAtCenter()
+                } label: {
+                    Label("Add Enemy", systemImage: "plus")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            let enemies = viewModel.blueprint.enemies
+            if enemies.isEmpty {
+                Text("Use the Enemy tool to place configurable AI actors with patrols, chase/flee logic, and melee or ranged attacks.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                let columns = Array(repeating: GridItem(.flexible(minimum: 32, maximum: 50), spacing: 6), count: 4)
+                LazyVGrid(columns: columns, spacing: 6) {
+                    ForEach(Array(enemies.enumerated()), id: \.element.id) { index, enemy in
+                        Button {
+                            viewModel.selectEnemy(enemy)
+                        } label: {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(viewModel.enemyColor(for: index).opacity(0.75))
+                                .frame(width: 44, height: 44)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .stroke(viewModel.selectedEnemyID == enemy.id ? Color.white : Color.clear, lineWidth: 2)
+                                )
+                                .overlay(
+                                    Text("\(index + 1)")
+                                        .font(.caption2.bold())
+                                        .foregroundStyle(.white)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Enemy #\(index + 1)")
+                    }
+                }
+            }
+
+            if let enemy = viewModel.selectedEnemy {
+                enemyDetailPanel(enemy: enemy)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func enemyDetailPanel(enemy: EnemyBlueprint) -> some View {
+        let current = viewModel.selectedEnemy ?? enemy
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Selected Enemy")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Text("Coordinate: r\(current.coordinate.row) c\(current.coordinate.column)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Group {
+                let widthBinding = Binding<Double>(
+                    get: {
+                        viewModel.selectedEnemy?.size.x ?? current.size.x
+                    },
+                    set: { viewModel.updateSelectedEnemySizeWidth($0) }
+                )
+                Slider(value: widthBinding, in: 20...160, step: 2)
+                Text(String(format: "Width: %.0f", widthBinding.wrappedValue))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                let heightBinding = Binding<Double>(
+                    get: { viewModel.selectedEnemy?.size.y ?? current.size.y },
+                    set: { viewModel.updateSelectedEnemySizeHeight($0) }
+                )
+                Slider(value: heightBinding, in: 20...220, step: 2)
+                Text(String(format: "Height: %.0f", heightBinding.wrappedValue))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Group {
+                let movementBinding = Binding<EnemyMovementChoice>(
+                    get: { viewModel.selectedEnemyMovementChoice },
+                    set: { viewModel.setSelectedEnemyMovementChoice($0) }
+                )
+                Picker("Movement", selection: movementBinding) {
+                    ForEach(EnemyMovementChoice.allCases) { choice in
+                        Text(choice.label).tag(choice)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                switch current.movement {
+                case .patrolHorizontal(let span, let speed):
+                    let spanBinding = Binding<Double>(
+                        get: {
+                            if case .patrolHorizontal(let value, _) = viewModel.selectedEnemy?.movement { return value }
+                            return span
+                        },
+                        set: { viewModel.updateSelectedEnemyHorizontalSpan($0) }
+                    )
+                    Slider(value: spanBinding, in: 16...800, step: 4)
+                    Text(String(format: "Span: %.0f", spanBinding.wrappedValue))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    let speedBinding = Binding<Double>(
+                        get: {
+                            if case .patrolHorizontal(_, let value) = viewModel.selectedEnemy?.movement { return value }
+                            return speed
+                        },
+                        set: { viewModel.updateSelectedEnemyHorizontalSpeed($0) }
+                    )
+                    Slider(value: speedBinding, in: 20...400, step: 5)
+                    Text(String(format: "Speed: %.0f", speedBinding.wrappedValue))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                case .patrolVertical(let span, let speed):
+                    let spanBinding = Binding<Double>(
+                        get: {
+                            if case .patrolVertical(let value, _) = viewModel.selectedEnemy?.movement { return value }
+                            return span
+                        },
+                        set: { viewModel.updateSelectedEnemyVerticalSpan($0) }
+                    )
+                    Slider(value: spanBinding, in: 16...800, step: 4)
+                    Text(String(format: "Span: %.0f", spanBinding.wrappedValue))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    let speedBinding = Binding<Double>(
+                        get: {
+                            if case .patrolVertical(_, let value) = viewModel.selectedEnemy?.movement { return value }
+                            return speed
+                        },
+                        set: { viewModel.updateSelectedEnemyVerticalSpeed($0) }
+                    )
+                    Slider(value: speedBinding, in: 20...400, step: 5)
+                    Text(String(format: "Speed: %.0f", speedBinding.wrappedValue))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                case .perimeter(let width, let height, let speed, let clockwise):
+                    let widthBinding = Binding<Double>(
+                        get: {
+                            if case .perimeter(let value, _, _, _) = viewModel.selectedEnemy?.movement { return value }
+                            return width
+                        },
+                        set: { viewModel.updateSelectedEnemyPerimeterWidth($0) }
+                    )
+                    Slider(value: widthBinding, in: 16...800, step: 4)
+                    Text(String(format: "Width: %.0f", widthBinding.wrappedValue))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    let heightBinding = Binding<Double>(
+                        get: {
+                            if case .perimeter(_, let value, _, _) = viewModel.selectedEnemy?.movement { return value }
+                            return height
+                        },
+                        set: { viewModel.updateSelectedEnemyPerimeterHeight($0) }
+                    )
+                    Slider(value: heightBinding, in: 16...800, step: 4)
+                    Text(String(format: "Height: %.0f", heightBinding.wrappedValue))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    let speedBinding = Binding<Double>(
+                        get: {
+                            if case .perimeter(_, _, let value, _) = viewModel.selectedEnemy?.movement { return value }
+                            return speed
+                        },
+                        set: { viewModel.updateSelectedEnemyPerimeterSpeed($0) }
+                    )
+                    Slider(value: speedBinding, in: 20...400, step: 5)
+                    Text(String(format: "Speed: %.0f", speedBinding.wrappedValue))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Toggle("Clockwise", isOn: Binding<Bool>(
+                        get: {
+                            if case .perimeter(_, _, _, let value) = viewModel.selectedEnemy?.movement { return value }
+                            return clockwise
+                        },
+                        set: { viewModel.updateSelectedEnemyPerimeterClockwise($0) }
+                    ))
+
+                case .wallBounce(let axis, let speed):
+                    Picker("Axis", selection: Binding<EnemyController.MovementPattern.Axis>(
+                        get: {
+                            if case .wallBounce(let value, _) = viewModel.selectedEnemy?.movement { return value }
+                            return axis
+                        },
+                        set: { viewModel.updateSelectedEnemyWallBounceAxis($0) }
+                    )) {
+                        Text("Horizontal").tag(EnemyController.MovementPattern.Axis.horizontal)
+                        Text("Vertical").tag(EnemyController.MovementPattern.Axis.vertical)
+                    }
+                    .pickerStyle(.segmented)
+
+                    let speedBinding = Binding<Double>(
+                        get: {
+                            if case .wallBounce(_, let value) = viewModel.selectedEnemy?.movement { return value }
+                            return speed
+                        },
+                        set: { viewModel.updateSelectedEnemyWallBounceSpeed($0) }
+                    )
+                    Slider(value: speedBinding, in: 40...400, step: 5)
+                    Text(String(format: "Speed: %.0f", speedBinding.wrappedValue))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                case .waypoints:
+                    Text("Waypoint movement editing is not yet available in the editor.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                case .idle:
+                    EmptyView()
+                }
+            }
+
+            Group {
+                let behaviorBinding = Binding<EnemyBehaviorChoice>(
+                    get: { viewModel.selectedEnemyBehaviorChoice },
+                    set: { viewModel.setSelectedEnemyBehaviorChoice($0) }
+                )
+                Picker("Behaviour", selection: behaviorBinding) {
+                    ForEach(EnemyBehaviorChoice.allCases) { choice in
+                        Text(choice.label).tag(choice)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                switch current.behavior {
+                case .passive:
+                    EmptyView()
+                case .chase(let range, let multiplier, let tolerance):
+                    Slider(value: Binding<Double>(
+                        get: { if case .chase(let value, _, _) = viewModel.selectedEnemy?.behavior { return value }; return range },
+                        set: { viewModel.updateSelectedEnemyChaseRange($0) }
+                    ), in: 32...1200, step: 10)
+                    let displayedRange = viewModel.selectedEnemy.flatMap { $0.behavior.flatChaseRange } ?? range
+                    Text(String(format: "Sight Range: %.0f", displayedRange))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .chase(_, let value, _) = viewModel.selectedEnemy?.behavior { return value }; return multiplier },
+                        set: { viewModel.updateSelectedEnemyChaseMultiplier($0) }
+                    ), in: 0.5...3.0, step: 0.05)
+                    let displayedMultiplier = viewModel.selectedEnemy.flatMap { $0.behavior.flatChaseMultiplier } ?? multiplier
+                    Text(String(format: "Speed Multiplier: %.2f", displayedMultiplier))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .chase(_, _, let value) = viewModel.selectedEnemy?.behavior { return value }; return tolerance },
+                        set: { viewModel.updateSelectedEnemyChaseTolerance($0) }
+                    ), in: 0...400, step: 5)
+                    let displayedTolerance = viewModel.selectedEnemy.flatMap { $0.behavior.flatChaseTolerance } ?? tolerance
+                    Text(String(format: "Vertical Tolerance: %.0f", displayedTolerance))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                case .flee(let range, let safe, let run):
+                    Slider(value: Binding<Double>(
+                        get: { if case .flee(let value, _, _) = viewModel.selectedEnemy?.behavior { return value }; return range },
+                        set: { viewModel.updateSelectedEnemyFleeRange($0) }
+                    ), in: 32...1200, step: 10)
+                    let fleeRange = viewModel.selectedEnemy.flatMap { $0.behavior.flatFleeRange } ?? range
+                    Text(String(format: "Sight Range: %.0f", fleeRange))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .flee(_, let value, _) = viewModel.selectedEnemy?.behavior { return value }; return safe },
+                        set: { viewModel.updateSelectedEnemyFleeSafeDistance($0) }
+                    ), in: 32...1200, step: 10)
+                    let safeDistance = viewModel.selectedEnemy.flatMap { $0.behavior.flatFleeSafe } ?? safe
+                    Text(String(format: "Safe Distance: %.0f", safeDistance))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .flee(_, _, let value) = viewModel.selectedEnemy?.behavior { return value }; return run },
+                        set: { viewModel.updateSelectedEnemyFleeRunMultiplier($0) }
+                    ), in: 0.5...3.0, step: 0.05)
+                    let fleeMultiplier = viewModel.selectedEnemy.flatMap { $0.behavior.flatFleeRun } ?? run
+                    Text(String(format: "Run Multiplier: %.2f", fleeMultiplier))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                case .strafe(let range, let preferred, let speed):
+                    Slider(value: Binding<Double>(
+                        get: { if case .strafe(let value, _, _) = viewModel.selectedEnemy?.behavior { return value }; return range },
+                        set: { viewModel.updateSelectedEnemyStrafeRange($0) }
+                    ), in: 60...1600, step: 10)
+                    let strafeRange = viewModel.selectedEnemy.flatMap { $0.behavior.flatStrafeRange } ?? range
+                    Text(String(format: "Sight Range: %.0f", strafeRange))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .strafe(_, let value, _) = viewModel.selectedEnemy?.behavior { return value.lowerBound }; return preferred.lowerBound },
+                        set: { viewModel.updateSelectedEnemyStrafeNearDistance($0) }
+                    ), in: 40...max(60, preferred.upperBound - 8), step: 5)
+                    let strafeNear = viewModel.selectedEnemy.flatMap { $0.behavior.flatStrafeNear } ?? preferred.lowerBound
+                    Text(String(format: "Preferred Near: %.0f", strafeNear))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .strafe(_, let value, _) = viewModel.selectedEnemy?.behavior { return value.upperBound }; return preferred.upperBound },
+                        set: { viewModel.updateSelectedEnemyStrafeFarDistance($0) }
+                    ), in: preferred.lowerBound + 8...1600, step: 5)
+                    let strafeFar = viewModel.selectedEnemy.flatMap { $0.behavior.flatStrafeFar } ?? preferred.upperBound
+                    Text(String(format: "Preferred Far: %.0f", strafeFar))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .strafe(_, _, let value) = viewModel.selectedEnemy?.behavior { return value }; return speed },
+                        set: { viewModel.updateSelectedEnemyStrafeSpeed($0) }
+                    ), in: 30...320, step: 5)
+                    let strafeSpeed = viewModel.selectedEnemy.flatMap { $0.behavior.flatStrafeSpeed } ?? speed
+                    Text(String(format: "Strafe Speed: %.0f", strafeSpeed))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Group {
+                let attackBinding = Binding<EnemyAttackChoice>(
+                    get: { viewModel.selectedEnemyAttackChoice },
+                    set: { viewModel.setSelectedEnemyAttackChoice($0) }
+                )
+                Picker("Attack", selection: attackBinding) {
+                    ForEach(EnemyAttackChoice.allCases) { choice in
+                        Text(choice.label).tag(choice)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                switch current.attack {
+                case .none:
+                    EmptyView()
+                case .shooter(let speed, let cooldown, let range):
+                    Slider(value: Binding<Double>(
+                        get: { if case .shooter(let value, _, _) = viewModel.selectedEnemy?.attack { return value }; return speed },
+                        set: { viewModel.updateSelectedEnemyShooterSpeed($0) }
+                    ), in: 80...900, step: 10)
+                    let bulletSpeed = viewModel.selectedEnemy.flatMap { $0.attack.flatShooterSpeed } ?? speed
+                    Text(String(format: "Bullet Speed: %.0f", bulletSpeed))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .shooter(_, let value, _) = viewModel.selectedEnemy?.attack { return value }; return cooldown },
+                        set: { viewModel.updateSelectedEnemyShooterCooldown($0) }
+                    ), in: 0.1...4, step: 0.05)
+                    let bulletCooldown = viewModel.selectedEnemy.flatMap { $0.attack.flatShooterCooldown } ?? cooldown
+                    Text(String(format: "Cooldown: %.2fs", bulletCooldown))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .shooter(_, _, let value) = viewModel.selectedEnemy?.attack { return value }; return range },
+                        set: { viewModel.updateSelectedEnemyShooterRange($0) }
+                    ), in: 80...1600, step: 10)
+                    let bulletRange = viewModel.selectedEnemy.flatMap { $0.attack.flatShooterRange } ?? range
+                    Text(String(format: "Range: %.0f", bulletRange))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                case .sword(let range, let cooldown, let knock):
+                    Slider(value: Binding<Double>(
+                        get: { if case .sword(let value, _, _) = viewModel.selectedEnemy?.attack { return value }; return range },
+                        set: { viewModel.updateSelectedEnemySwordRange($0) }
+                    ), in: 16...160, step: 2)
+                    let meleeRange = viewModel.selectedEnemy.flatMap { $0.attack.flatMeleeRange } ?? range
+                    Text(String(format: "Range: %.0f", meleeRange))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .sword(_, let value, _) = viewModel.selectedEnemy?.attack { return value }; return cooldown },
+                        set: { viewModel.updateSelectedEnemySwordCooldown($0) }
+                    ), in: 0.2...4, step: 0.05)
+                    let meleeCooldown = viewModel.selectedEnemy.flatMap { $0.attack.flatMeleeCooldown } ?? cooldown
+                    Text(String(format: "Cooldown: %.2fs", meleeCooldown))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .sword(_, _, let value) = viewModel.selectedEnemy?.attack { return value }; return knock },
+                        set: { viewModel.updateSelectedEnemySwordKnockback($0) }
+                    ), in: 0...600, step: 10)
+                    let meleeKnock = viewModel.selectedEnemy.flatMap { $0.attack.flatMeleeKnockback } ?? knock
+                    Text(String(format: "Knockback: %.0f", meleeKnock))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                case .punch(let range, let cooldown, let knock):
+                    Slider(value: Binding<Double>(
+                        get: { if case .punch(let value, _, _) = viewModel.selectedEnemy?.attack { return value }; return range },
+                        set: { viewModel.updateSelectedEnemyPunchRange($0) }
+                    ), in: 8...120, step: 2)
+                    let meleeRange = viewModel.selectedEnemy.flatMap { $0.attack.flatMeleeRange } ?? range
+                    Text(String(format: "Range: %.0f", meleeRange))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .punch(_, let value, _) = viewModel.selectedEnemy?.attack { return value }; return cooldown },
+                        set: { viewModel.updateSelectedEnemyPunchCooldown($0) }
+                    ), in: 0.2...4, step: 0.05)
+                    let meleeCooldown = viewModel.selectedEnemy.flatMap { $0.attack.flatMeleeCooldown } ?? cooldown
+                    Text(String(format: "Cooldown: %.2fs", meleeCooldown))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: Binding<Double>(
+                        get: { if case .punch(_, _, let value) = viewModel.selectedEnemy?.attack { return value }; return knock },
+                        set: { viewModel.updateSelectedEnemyPunchKnockback($0) }
+                    ), in: 0...600, step: 10)
+                    let meleeKnock = viewModel.selectedEnemy.flatMap { $0.attack.flatMeleeKnockback } ?? knock
+                    Text(String(format: "Knockback: %.0f", meleeKnock))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Group {
+                Slider(value: Binding<Double>(
+                    get: { viewModel.selectedEnemy?.acceleration ?? current.acceleration },
+                    set: { viewModel.updateSelectedEnemyAcceleration($0) }
+                ), in: 2...30, step: 0.5)
+                Text(String(format: "Acceleration: %.1f", viewModel.selectedEnemy?.acceleration ?? current.acceleration))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Slider(value: Binding<Double>(
+                    get: { viewModel.selectedEnemy?.maxSpeed ?? current.maxSpeed },
+                    set: { viewModel.updateSelectedEnemyMaxSpeed($0) }
+                ), in: 60...600, step: 5)
+                Text(String(format: "Max Speed: %.0f", viewModel.selectedEnemy?.maxSpeed ?? current.maxSpeed))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Affected by Gravity", isOn: Binding<Bool>(
+                    get: { viewModel.selectedEnemy?.affectedByGravity ?? current.affectedByGravity },
+                    set: { viewModel.updateSelectedEnemyGravityEnabled($0) }
+                ))
+
+                let gravityBinding = Binding<Double>(
+                    get: { viewModel.selectedEnemy?.gravityScale ?? current.gravityScale },
+                    set: { viewModel.updateSelectedEnemyGravityScale($0) }
+                )
+                Slider(value: gravityBinding, in: 0...2.0, step: 0.05)
+                    .disabled(!(viewModel.selectedEnemy?.affectedByGravity ?? current.affectedByGravity))
+                Text(String(format: "Gravity Scale: %.2f", gravityBinding.wrappedValue))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Button {
+                    viewModel.duplicateSelectedEnemy()
+                } label: {
+                    Label("Duplicate", systemImage: "plus.square.on.square")
+                        .font(.caption)
+                }
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    viewModel.removeSelectedEnemy()
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                        .font(.caption)
+                }
+            }
+        }
+        .padding(12)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var levelNameSection: some View {
@@ -1779,6 +2894,113 @@ private extension SentryBlueprint.ProjectileKind {
     }
 }
 
+private extension EnemyBlueprint.Behavior {
+    var flatChaseRange: Double? {
+        if case .chase(let range, _, _) = self { return range }
+        return nil
+    }
+
+    var flatChaseMultiplier: Double? {
+        if case .chase(_, let multiplier, _) = self { return multiplier }
+        return nil
+    }
+
+    var flatChaseTolerance: Double? {
+        if case .chase(_, _, let tolerance) = self { return tolerance }
+        return nil
+    }
+
+    var flatFleeRange: Double? {
+        if case .flee(let range, _, _) = self { return range }
+        return nil
+    }
+
+    var flatFleeSafe: Double? {
+        if case .flee(_, let safe, _) = self { return safe }
+        return nil
+    }
+
+    var flatFleeRun: Double? {
+        if case .flee(_, _, let run) = self { return run }
+        return nil
+    }
+
+    var flatStrafeRange: Double? {
+        if case .strafe(let range, _, _) = self { return range }
+        return nil
+    }
+
+    var flatStrafeNear: Double? {
+        if case .strafe(_, let preferred, _) = self { return preferred.lowerBound }
+        return nil
+    }
+
+    var flatStrafeFar: Double? {
+        if case .strafe(_, let preferred, _) = self { return preferred.upperBound }
+        return nil
+    }
+
+    var flatStrafeSpeed: Double? {
+        if case .strafe(_, _, let speed) = self { return speed }
+        return nil
+    }
+}
+
+private extension EnemyBlueprint.Attack {
+    var flatShooterSpeed: Double? {
+        if case .shooter(let speed, _, _) = self { return speed }
+        return nil
+    }
+
+    var flatShooterCooldown: Double? {
+        if case .shooter(_, let cooldown, _) = self { return cooldown }
+        return nil
+    }
+
+    var flatShooterRange: Double? {
+        if case .shooter(_, _, let range) = self { return range }
+        return nil
+    }
+
+    var flatMeleeRange: Double? {
+        switch self {
+        case .sword(let range, _, _), .punch(let range, _, _):
+            return range
+        default:
+            return nil
+        }
+    }
+
+    var flatMeleeCooldown: Double? {
+        switch self {
+        case .sword(_, let cooldown, _), .punch(_, let cooldown, _):
+            return cooldown
+        default:
+            return nil
+        }
+    }
+
+    var flatMeleeKnockback: Double? {
+        switch self {
+        case .sword(_, _, let knock), .punch(_, _, let knock):
+            return knock
+        default:
+            return nil
+        }
+    }
+}
+
+private extension EnemyBlueprint {
+    var behaviorLabelPrefix: String {
+        switch behavior {
+        case .passive: return "P"
+        case .chase: return "C"
+        case .flee: return "F"
+        case .strafe: return "R"
+        }
+    }
+}
+
 private struct MapCanvasView: View {
     let blueprint: LevelBlueprint
     let previewTiles: Set<GridPoint>
@@ -1787,6 +3009,7 @@ private struct MapCanvasView: View {
     let selectedSpawnID: PlayerSpawnPoint.ID?
     let selectedPlatformID: MovingPlatformBlueprint.ID?
     let selectedSentryID: SentryBlueprint.ID?
+    let selectedEnemyID: EnemyBlueprint.ID?
     let previewColor: Color
     let hoveredPoint: GridPoint?
     let onHover: (GridPoint?) -> Void
@@ -1873,6 +3096,10 @@ private struct MapCanvasView: View {
                     if spawn.id == selectedSpawnID {
                         context.stroke(path, with: .color(Color.white), lineWidth: 2)
                     }
+                }
+
+                for (index, enemy) in blueprint.enemies.enumerated() {
+                    drawEnemy(enemy, index: index, origin: origin, tileSize: tileSize, context: &context)
                 }
 
                 for (index, sentry) in blueprint.sentries.enumerated() {
@@ -2040,6 +3267,67 @@ private struct MapCanvasView: View {
             line.move(to: center)
             line.addLine(to: tip)
             context.stroke(line, with: .color(color.opacity(0.5)), lineWidth: 2)
+        }
+    }
+
+    private func drawEnemy(
+        _ enemy: EnemyBlueprint,
+        index: Int,
+        origin: CGPoint,
+        tileSize: CGFloat,
+        context: inout GraphicsContext
+    ) {
+        let color = EnemyPalette.color(for: index)
+        let center = CGPoint(
+            x: origin.x + (CGFloat(enemy.coordinate.column) + 0.5) * tileSize,
+            y: origin.y + (CGFloat(enemy.coordinate.row) + 0.5) * tileSize
+        )
+        let tileSizeValue = max(Double(tileSize), 1.0)
+        let widthScale = min(max(enemy.size.x / tileSizeValue, 0.4), 1.8)
+        let heightScale = min(max(enemy.size.y / tileSizeValue, 0.6), 2.1)
+        let drawWidth = tileSize * CGFloat(widthScale)
+        let drawHeight = tileSize * CGFloat(heightScale)
+        let rect = CGRect(
+            x: center.x - drawWidth * 0.5,
+            y: center.y - drawHeight * 0.5,
+            width: drawWidth,
+            height: drawHeight
+        )
+        let path = Path(roundedRect: rect, cornerRadius: min(drawWidth, drawHeight) * 0.2)
+        context.fill(path, with: .color(color.opacity(0.85)))
+        if enemy.id == selectedEnemyID {
+            context.stroke(path, with: .color(.white), lineWidth: 2)
+        } else {
+            context.stroke(path, with: .color(color.opacity(0.6)), lineWidth: 1)
+        }
+
+        let attackLabel: String
+        switch enemy.attack {
+        case .none: attackLabel = enemy.behaviorLabelPrefix
+        case .shooter: attackLabel = "R"
+        case .sword: attackLabel = "S"
+        case .punch: attackLabel = "P"
+        }
+
+        context.draw(
+            Text(attackLabel)
+                .font(.system(size: max(10, tileSize * 0.4), weight: .bold, design: .rounded))
+                .foregroundStyle(.white),
+            at: center,
+            anchor: .center
+        )
+
+        if case .wallBounce(let axis, _) = enemy.movement {
+            var indicator = Path()
+            switch axis {
+            case .horizontal:
+                indicator.move(to: CGPoint(x: rect.minX, y: center.y))
+                indicator.addLine(to: CGPoint(x: rect.maxX, y: center.y))
+            case .vertical:
+                indicator.move(to: CGPoint(x: center.x, y: rect.minY))
+                indicator.addLine(to: CGPoint(x: center.x, y: rect.maxY))
+            }
+            context.stroke(indicator, with: .color(Color.white.opacity(0.7)), lineWidth: 1.5)
         }
     }
 }

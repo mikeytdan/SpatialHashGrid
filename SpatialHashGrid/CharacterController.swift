@@ -11,12 +11,12 @@ final class CharacterController {
     // Physical tuning
     var width: Double = 28
     var height: Double = 60
-    var moveSpeed: Double = 300
-    var airControl: Double = 0.5
-    var jumpImpulse: Double = 700
-    var wallJumpImpulse: Vec2 = Vec2(500, -700)
-    var maxFallSpeed: Double = 1200
-    var wallSlideSpeed: Double = 200
+    var moveSpeed: Double = 380
+    var airControl: Double = 0.55
+    var jumpImpulse: Double = 820
+    var wallJumpImpulse: Vec2 = Vec2(560, -820)
+    var maxFallSpeed: Double = 1500
+    var wallSlideSpeed: Double = 240
     var groundFriction: Double = 12.0
     var coyoteTime: Double = 0.12
     var extraJumps: Int = 1

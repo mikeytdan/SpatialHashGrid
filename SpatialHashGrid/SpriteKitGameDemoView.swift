@@ -11,6 +11,8 @@ final class SpriteKitGameDemoScene: SKScene {
     private var platformNodes: [ColliderID: SKSpriteNode] = [:]
     // Cache ids so dynamic updates can fetch current state without scanning every collider.
     private var movingPlatformIDs: [ColliderID] = []
+    private var enemyNodes: [ColliderID: SKSpriteNode] = [:]
+    private var projectileNodes: [UUID: SKShapeNode] = [:]
     private var playerNode = SKSpriteNode(color: .green, size: .zero)
 
     init(viewModel: GameDemoViewModel) {
@@ -74,17 +76,17 @@ final class SpriteKitGameDemoScene: SKScene {
     }
 
     private func syncDynamicNodes() {
-        var seen: Set<ColliderID> = []
+        var seenPlatforms: Set<ColliderID> = []
         for id in movingPlatformIDs {
             guard let collider = viewModel.world.collider(for: id) else { continue }
             let node = platformNodes[id] ?? makePlatformNode(for: collider)
             platformNodes[id] = node
             node.size = sizeForAABB(collider.aabb)
             node.position = centerForAABB(collider.aabb)
-            seen.insert(id)
+            seenPlatforms.insert(id)
         }
 
-        for (id, node) in platformNodes where !seen.contains(id) {
+        for (id, node) in platformNodes where !seenPlatforms.contains(id) {
             node.removeFromParent()
             platformNodes.removeValue(forKey: id)
         }
@@ -92,6 +94,34 @@ final class SpriteKitGameDemoScene: SKScene {
         if let playerAABB = viewModel.playerAABB() {
             playerNode.size = sizeForAABB(playerAABB)
             playerNode.position = centerForAABB(playerAABB)
+        }
+
+        let enemySnapshots = viewModel.enemySnapshots()
+        var seenEnemies: Set<ColliderID> = []
+        for enemy in enemySnapshots {
+            let node = enemyNodes[enemy.id] ?? makeEnemyNode()
+            enemyNodes[enemy.id] = node
+            node.size = sizeForAABB(enemy.aabb)
+            node.position = centerForAABB(enemy.aabb)
+            node.color = enemy.targetVisible ? .red : SKColor.orange
+            seenEnemies.insert(enemy.id)
+        }
+        for (id, node) in enemyNodes where !seenEnemies.contains(id) {
+            node.removeFromParent()
+            enemyNodes.removeValue(forKey: id)
+        }
+
+        let projectileSnapshots = viewModel.projectileSnapshots()
+        var seenProjectiles: Set<UUID> = []
+        for projectile in projectileSnapshots {
+            let node = projectileNodes[projectile.id] ?? makeProjectileNode(radius: projectile.radius)
+            projectileNodes[projectile.id] = node
+            node.position = pointForWorld(projectile.position)
+            seenProjectiles.insert(projectile.id)
+        }
+        for (id, node) in projectileNodes where !seenProjectiles.contains(id) {
+            node.removeFromParent()
+            projectileNodes.removeValue(forKey: id)
         }
     }
 
@@ -101,6 +131,24 @@ final class SpriteKitGameDemoScene: SKScene {
         node.zPosition = 1
         worldNode.addChild(node)
         return node
+    }
+
+    private func makeEnemyNode() -> SKSpriteNode {
+        let node = SKSpriteNode(color: .orange, size: .zero)
+        node.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        node.zPosition = 2.5
+        worldNode.addChild(node)
+        return node
+    }
+
+    private func makeProjectileNode(radius: Double) -> SKShapeNode {
+        let circle = SKShapeNode(circleOfRadius: CGFloat(radius))
+        circle.fillColor = SKColor.orange
+        circle.strokeColor = SKColor.white.withAlphaComponent(0.6)
+        circle.lineWidth = 1
+        circle.zPosition = 3
+        worldNode.addChild(circle)
+        return circle
     }
 
     private func color(for id: ColliderID) -> SKColor {
@@ -118,6 +166,10 @@ final class SpriteKitGameDemoScene: SKScene {
         let cyWorld = (aabb.min.y + aabb.max.y) * 0.5
         let cy = worldHeight - CGFloat(cyWorld)
         return CGPoint(x: cx, y: cy)
+    }
+
+    private func pointForWorld(_ p: Vec2) -> CGPoint {
+        CGPoint(x: CGFloat(p.x), y: worldHeight - CGFloat(p.y))
     }
 
     private func sizeForAABB(_ aabb: AABB) -> CGSize {

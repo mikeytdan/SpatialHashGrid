@@ -34,6 +34,8 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     private var sentryStates: [SentryRuntimeState] = []
     private var projectileStates: [ProjectileRuntimeState] = []
     private var laserStates: [LaserRuntimeState] = []
+    private var enemies: [EnemyController] = []
+    private var enemyColorIndices: [ColliderID: Int] = [:]
 
     private struct PlatformRuntimeState {
         let blueprint: MovingPlatformBlueprint
@@ -118,6 +120,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
 
         buildMovingPlatforms()
         buildSentries()
+        buildEnemies()
     }
 
     func start() {
@@ -149,10 +152,12 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     }
 
     private func fixedStep(_ dt: Double) {
-        let input = InputState(moveX: moveAxis, jumpPressed: jumpQueued)
-        player.update(input: input, dt: dt)
-        jumpQueued = false
         stepPlatforms(dt: dt)
+        let jump = jumpQueued
+        jumpQueued = false
+        let input = InputState(moveX: moveAxis, jumpPressed: jump)
+        player.update(input: input, dt: dt)
+        updateEnemies(dt: dt)
         updateSentries(dt: dt)
         updateProjectiles(dt: dt)
         updateLasers(dt: dt)
@@ -301,6 +306,18 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         laserStates.removeAll(keepingCapacity: true)
     }
 
+    private func buildEnemies() {
+        enemies.removeAll(keepingCapacity: true)
+        enemyColorIndices.removeAll(keepingCapacity: true)
+        for (index, enemyBlueprint) in blueprint.enemies.enumerated() {
+            let config = enemyBlueprint.configuration()
+            let spawn = enemyBlueprint.worldPosition(tileSize: tileSize)
+            let controller = EnemyController(world: world, spawn: spawn, configuration: config)
+            enemies.append(controller)
+            enemyColorIndices[controller.id] = index
+        }
+    }
+
     struct SentrySnapshot: Identifiable {
         let id: UUID
         let position: Vec2
@@ -366,6 +383,34 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
                 ownerID: laser.ownerID,
                 progress: laser.age / max(laser.duration, 0.0001)
             )
+        }
+    }
+
+    func enemySnapshots() -> [EnemyController.Snapshot] {
+        enemies.compactMap { $0.snapshot() }
+    }
+
+    func enemyColorIndex(for colliderID: ColliderID) -> Int {
+        if let cached = enemyColorIndices[colliderID] {
+            return cached
+        }
+        if let found = enemies.firstIndex(where: { $0.id == colliderID }) {
+            enemyColorIndices[colliderID] = found
+            return found
+        }
+        return 0
+    }
+
+    private func updateEnemies(dt: Double) {
+        guard !enemies.isEmpty else { return }
+        guard let playerCollider = world.collider(for: player.id) else { return }
+        let perception = EnemyController.Perception(
+            position: player.body.position,
+            velocity: player.body.velocity,
+            aabb: playerCollider.aabb
+        )
+        for enemy in enemies {
+            _ = enemy.update(perception: perception, dt: dt)
         }
     }
 
@@ -700,6 +745,7 @@ final class SpriteKitLevelPreviewScene: SKScene {
     private var staticTileNode: SKNode?
     private var playerNode = SKSpriteNode(color: .green, size: .zero)
     private var spawnNodes: [UUID: SKShapeNode] = [:]
+    private var enemyNodes: [ColliderID: SKSpriteNode] = [:]
     private var platformNodes: [UUID: SKSpriteNode] = [:]
     private var sentryNodes: [UUID: SentryNode] = [:]
     private var projectileNodes: [UUID: SKShapeNode] = [:]
@@ -731,6 +777,9 @@ final class SpriteKitLevelPreviewScene: SKScene {
         rebuildSpawnMarkers()
         rebuildPlatformNodes()
         rebuildSentryNodes()
+        for node in enemyNodes.values { node.removeFromParent() }
+        enemyNodes.removeAll()
+        syncEnemyNodes()
         ensurePlayerNode()
     }
 
@@ -794,6 +843,7 @@ final class SpriteKitLevelPreviewScene: SKScene {
         // 4) Advance simulation & sync nodes
         runtime.step()
         syncPlayerNode()
+        syncEnemyNodes()
         syncPlatformNodes()
         syncSentryNodes()
         syncLaserNodes()
@@ -893,6 +943,20 @@ final class SpriteKitLevelPreviewScene: SKScene {
         syncProjectileNodes()
     }
 
+    private func syncEnemyNodes() {
+        var seen: Set<ColliderID> = []
+        for snapshot in runtime.enemySnapshots() {
+            let node = enemyNodes[snapshot.id] ?? makeEnemyNode(for: snapshot.id)
+            updateEnemyNode(node, with: snapshot)
+            seen.insert(snapshot.id)
+        }
+
+        for (id, node) in enemyNodes where !seen.contains(id) {
+            node.removeFromParent()
+            enemyNodes.removeValue(forKey: id)
+        }
+    }
+
     private func syncPlatformNodes() {
         var seen: Set<UUID> = []
         for (index, platform) in runtime.blueprint.movingPlatforms.enumerated() {
@@ -982,6 +1046,21 @@ final class SpriteKitLevelPreviewScene: SKScene {
         node.zPosition = 1.5
         worldNode.addChild(node)
         return node
+    }
+
+    private func makeEnemyNode(for id: ColliderID) -> SKSpriteNode {
+        let node = SKSpriteNode(color: enemyColor(for: id, highlighted: false), size: .zero)
+        node.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        node.zPosition = 2.4
+        worldNode.addChild(node)
+        enemyNodes[id] = node
+        return node
+    }
+
+    private func updateEnemyNode(_ node: SKSpriteNode, with snapshot: EnemyController.Snapshot) {
+        node.size = size(for: snapshot.aabb)
+        node.position = center(for: snapshot.aabb)
+        node.color = enemyColor(for: snapshot.id, highlighted: snapshot.targetVisible)
     }
 
     private func makeProjectileNode(for snapshot: LevelPreviewRuntime.ProjectileSnapshot) -> SKShapeNode {
@@ -1109,6 +1188,20 @@ final class SpriteKitLevelPreviewScene: SKScene {
         return SentryPalette.nsColor(for: index)
         #else
         return SKColor.systemRed
+        #endif
+    }
+
+    private func enemyColor(for id: ColliderID, highlighted: Bool) -> SKColor {
+        let index = runtime.enemyColorIndex(for: id)
+        #if canImport(UIKit)
+        let base = EnemyPalette.uiColor(for: index)
+        return base.withAlphaComponent(highlighted ? 0.95 : 0.8)
+        #elseif canImport(AppKit) && !targetEnvironment(macCatalyst)
+        let base = EnemyPalette.nsColor(for: index)
+        return base.withAlphaComponent(highlighted ? 0.95 : 0.8)
+        #else
+        let base = SKColor.orange
+        return base.withAlphaComponent(highlighted ? 0.95 : 0.8)
         #endif
     }
 

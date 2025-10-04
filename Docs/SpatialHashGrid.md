@@ -58,3 +58,19 @@ let grid = SpatialHashGrid<Int>(cellSize: 1.0)
 let id = 42
 _ = grid.insert(id: id, aabb: .fromCircle(center: .init(0, 0), radius: 0.25))
 let hits = grid.query(aabb: AABB(min: .init(-0.5, -0.5), max: .init(0.5, 0.5)))
+```
+
+## Demo AI additions
+
+The SwiftUI/SpriteKit demos now include a configurable enemy sandbox powered by
+`EnemyController`. Each enemy exposes three tuning surfaces:
+
+- **Movement pattern**: horizontal/vertical patrols, perimeter crawls around a bounding box, or waypoint lists.
+- **Behaviour profile**: passive sentries, hunters that chase once they see the player, cowards that sprint away, and ranged units that strafe while keeping optimal distance.
+- **Attack style**: ranged shooting, sword swipes, or close punches — each with configurable reach, cooldowns, and knockback.
+
+See `SpatialHashGrid/EnemyController.swift` and `SpatialHashGrid/GameDemoView.swift` for concrete wiring examples.
+
+## Map editor refresh
+
+`MapEditorView` can now place and configure AI enemies alongside tiles, spawns, and sentries. The inspector exposes the same movement presets (including the new wall-bounce axis reversal), behaviour profiles, gravity toggles, and attack styles used by `EnemyController.Configuration`. Canvas glyphs tint enemies by palette, highlight selections, and sketch movement hints so layouts remain readable while authoring.

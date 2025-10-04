@@ -66,9 +66,14 @@ final class PhysicsWorld {
     }
 
     @discardableResult
-    func addMovingPlatform(aabb: AABB, material: Material = .init(), initialVelocity: Vec2 = .init(0, 0)) -> ColliderID {
+    func addMovingPlatform(
+        aabb: AABB,
+        material: Material = .init(),
+        initialVelocity: Vec2 = .init(0, 0),
+        tag: Int32 = 0
+    ) -> ColliderID {
         let id = allocID()
-        let col = Collider(id: id, aabb: aabb, shape: .aabb, type: .movingPlatform, material: material)
+        let col = Collider(id: id, aabb: aabb, shape: .aabb, type: .movingPlatform, material: material, tag: tag)
         colliders[id] = col
         dynamicGrid.insert(id: id, aabb: aabb)
         platformVelocities[id] = initialVelocity
@@ -77,9 +82,14 @@ final class PhysicsWorld {
     }
 
     @discardableResult
-    func addDynamicEntity(aabb: AABB, material: Material = .init(), shape: Shape = .aabb) -> ColliderID {
+    func addDynamicEntity(
+        aabb: AABB,
+        material: Material = .init(),
+        shape: Shape = .aabb,
+        tag: Int32 = 0
+    ) -> ColliderID {
         let id = allocID()
-        let col = Collider(id: id, aabb: aabb, shape: shape, type: .dynamicEntity, material: material)
+        let col = Collider(id: id, aabb: aabb, shape: shape, type: .dynamicEntity, material: material, tag: tag)
         colliders[id] = col
         dynamicGrid.insert(id: id, aabb: aabb)
         return id
@@ -169,7 +179,8 @@ final class PhysicsWorld {
         dt: Double,
         extraDisplacement: Vec2 = Vec2(0, 0),
         allowOneWay: Bool = true,
-        outContacts: inout [Contact]
+        outContacts: inout [Contact],
+        gravityScale: Double = 1.0
     ) {
         outContacts.removeAll(keepingCapacity: true)
 
@@ -177,7 +188,7 @@ final class PhysicsWorld {
         var velocity = state.velocity
         let halfSize = state.size
 
-        velocity += gravity * dt
+        velocity += gravity * gravityScale * dt
 
         resolvePenetrations(
             id: id,

@@ -11,6 +11,26 @@ final class GameDemoViewModel: ObservableObject {
     let world: PhysicsWorld
     let player: CharacterController
 
+    // Enemy and combat state
+    private var enemies: [EnemyController] = []
+    private var projectiles: [Projectile] = []
+    private var combatLog: [CombatLogEntry] = []
+    private var damageFlashTimer: Double = 0
+
+    struct Projectile: Identifiable {
+        var id = UUID()
+        var position: Vec2
+        var velocity: Vec2
+        var lifetime: Double
+        var radius: Double
+    }
+
+    struct CombatLogEntry: Identifiable {
+        let id = UUID()
+        var message: String
+        var ttl: Double
+    }
+
     // Moving platform demo
     private var platformID: ColliderID = 0
     private var platformVelocity: Vec2 = Vec2(160, 0)
@@ -110,14 +130,16 @@ final class GameDemoViewModel: ObservableObject {
         // Player
         let spawn = Vec2(7 * tileSize, 8 * tileSize)
         player = CharacterController(world: world, spawn: spawn)
-        player.moveSpeed = 320
-        player.wallSlideSpeed = 220
-        player.jumpImpulse = 700
-        player.wallJumpImpulse = Vec2(500, -700)
+        player.moveSpeed = 380
+        player.wallSlideSpeed = 240
+        player.jumpImpulse = 820
+        player.wallJumpImpulse = Vec2(560, -820)
 
         player.extraJumps = 1 // double-jump
         player.coyoteTime = 0.12
         player.groundFriction = 12.0
+
+        spawnDemoEnemies()
     }
 
     func queueJump() { jumpQueued = true }
@@ -137,6 +159,58 @@ final class GameDemoViewModel: ObservableObject {
         }
         // Publish a frame tick to force SwiftUI to redraw even without user interaction
         frameTick &+= 1
+    }
+
+    private func spawnDemoEnemies() {
+        let groundY = Double(rows - 3) * tileSize
+
+        let hunterConfig = EnemyController.Configuration(
+            size: Vec2(44, 54),
+            movement: .patrolHorizontal(span: 120, speed: 90),
+            behavior: .chase(.init(sightRange: 340, speedMultiplier: 1.35)),
+            attack: .punch(.init(range: 36, cooldown: 1.1, knockback: 220)),
+            gravityScale: 1.0,
+            acceleration: 9.0,
+            maxSpeed: 260
+        )
+        let hunter = EnemyController(
+            world: world,
+            spawn: Vec2(13 * tileSize, groundY),
+            configuration: hunterConfig
+        )
+        enemies.append(hunter)
+
+        let floaterConfig = EnemyController.Configuration(
+            size: Vec2(40, 40),
+            movement: .patrolVertical(span: 140, speed: 70),
+            behavior: .flee(.init(sightRange: 280, safeDistance: 220, runMultiplier: 1.8)),
+            attack: .none,
+            gravityScale: 0,
+            acceleration: 6.0,
+            maxSpeed: 220
+        )
+        let floater = EnemyController(
+            world: world,
+            spawn: Vec2(22 * tileSize, 10 * tileSize),
+            configuration: floaterConfig
+        )
+        enemies.append(floater)
+
+        let rangerConfig = EnemyController.Configuration(
+            size: Vec2(42, 42),
+            movement: .perimeter(width: 220, height: 140, speed: 110, clockwise: true),
+            behavior: .strafeAndShoot(.init(sightRange: 380, preferredDistance: 140...260, strafeSpeed: 140)),
+            attack: .shooter(.init(speed: 460, cooldown: 1.25, range: 420)),
+            gravityScale: 0,
+            acceleration: 10.0,
+            maxSpeed: 320
+        )
+        let ranger = EnemyController(
+            world: world,
+            spawn: Vec2(28 * tileSize, 7 * tileSize),
+            configuration: rangerConfig
+        )
+        enemies.append(ranger)
     }
 
     private func fixedStep(_ dt: Double) {
@@ -208,6 +282,120 @@ final class GameDemoViewModel: ObservableObject {
         jumpQueued = false
         let input = InputState(moveX: moveAxis, jumpPressed: jump, grabHeld: false, climbHeld: false)
         player.update(input: input, dt: dt)
+
+        updateEnemies(dt: dt)
+        updateProjectiles(dt: dt)
+        decayCombatLog(dt: dt)
+        damageFlashTimer = max(0, damageFlashTimer - dt)
+    }
+
+    private func updateEnemies(dt: Double) {
+        guard !enemies.isEmpty else { return }
+        guard let playerCollider = world.collider(for: player.id) else { return }
+        let perception = EnemyController.Perception(
+            position: player.body.position,
+            velocity: player.body.velocity,
+            aabb: playerCollider.aabb
+        )
+        var events: [EnemyController.AttackEvent] = []
+        for enemy in enemies {
+            events.append(contentsOf: enemy.update(perception: perception, dt: dt))
+        }
+        if !events.isEmpty {
+            handleEnemyAttacks(events, perception: perception)
+        }
+    }
+
+    private func handleEnemyAttacks(_ events: [EnemyController.AttackEvent], perception: EnemyController.Perception) {
+        for event in events {
+            switch event.kind {
+            case .projectile(let speed, let direction):
+                let projectile = Projectile(
+                    position: event.origin,
+                    velocity: direction * speed,
+                    lifetime: 3.0,
+                    radius: 10
+                )
+                projectiles.append(projectile)
+            case .melee(let type, let range, let knockback):
+                if meleeHitsPlayer(origin: event.origin, range: range, playerAABB: perception.aabb) {
+                    let verb: String
+                    switch type {
+                    case .sword: verb = "sword swipe"
+                    case .punch: verb = "punch"
+                    }
+                    recordHit("Enemy \(verb) connected!", knockback: knockback, source: event.origin)
+                }
+            }
+        }
+    }
+
+    private func meleeHitsPlayer(origin: Vec2, range: Double, playerAABB: AABB) -> Bool {
+        let playerCenter = playerAABB.center
+        let dx = playerCenter.x - origin.x
+        let dy = playerCenter.y - origin.y
+        let distSq = dx * dx + dy * dy
+        let playerRadius = hypot((playerAABB.max.x - playerAABB.min.x) * 0.5, (playerAABB.max.y - playerAABB.min.y) * 0.5)
+        let total = range + playerRadius
+        return distSq <= total * total
+    }
+
+    private func updateProjectiles(dt: Double) {
+        guard !projectiles.isEmpty else { return }
+        var survivors: [Projectile] = []
+        let playerCollider = world.collider(for: player.id)
+        for var projectile in projectiles {
+            projectile.position += projectile.velocity * dt
+            projectile.lifetime -= dt
+            guard projectile.lifetime > 0 else { continue }
+            if let collider = playerCollider,
+               projectileHits(projectile, playerAABB: collider.aabb) {
+                recordHit("Projectile hit the player!", knockback: 120, source: projectile.position)
+                continue
+            }
+            if outOfBounds(projectile.position) { continue }
+            survivors.append(projectile)
+        }
+        projectiles = survivors
+    }
+
+    private func projectileHits(_ projectile: Projectile, playerAABB: AABB) -> Bool {
+        let px = projectile.position.x
+        let py = projectile.position.y
+        let clampedX = max(playerAABB.min.x, min(playerAABB.max.x, px))
+        let clampedY = max(playerAABB.min.y, min(playerAABB.max.y, py))
+        let dx = px - clampedX
+        let dy = py - clampedY
+        return dx * dx + dy * dy <= projectile.radius * projectile.radius
+    }
+
+    private func outOfBounds(_ position: Vec2) -> Bool {
+        let margin: Double = 64
+        return position.x < -margin || position.x > worldWidth + margin || position.y < -margin || position.y > worldHeight + margin
+    }
+
+    private func decayCombatLog(dt: Double) {
+        guard !combatLog.isEmpty else { return }
+        combatLog = combatLog.compactMap { entry in
+            var copy = entry
+            copy.ttl -= dt
+            return copy.ttl > 0 ? copy : nil
+        }
+    }
+
+    private func recordHit(_ message: String, knockback: Double, source: Vec2) {
+        combatLog.append(CombatLogEntry(message: message, ttl: 2.5))
+        damageFlashTimer = max(damageFlashTimer, 0.25)
+        if knockback > 0 {
+            let direction = normalized(player.body.position - source)
+            player.body.velocity += direction * knockback
+        }
+    }
+
+    private func normalized(_ v: Vec2) -> Vec2 {
+        let len = sqrt(v.x * v.x + v.y * v.y)
+        guard len > 1e-5 else { return Vec2(0, 0) }
+        return v / len
     }
 
     // Rendering helpers
@@ -215,6 +403,12 @@ final class GameDemoViewModel: ObservableObject {
     func playerAABB() -> AABB? { world.collider(for: player.id)?.aabb }
     func isOverheadPlatform(_ id: ColliderID) -> Bool { id == platformID_Overhead }
     func isVerticalPlatform(_ id: ColliderID) -> Bool { id == platformID_V }
+    func isEnemyCollider(_ id: ColliderID) -> Bool { enemies.contains(where: { $0.id == id }) }
+    func isPlayerCollider(_ id: ColliderID) -> Bool { id == player.id }
+    func enemySnapshots() -> [EnemyController.Snapshot] { enemies.compactMap { $0.snapshot() } }
+    func projectileSnapshots() -> [Projectile] { projectiles }
+    func combatEntries() -> [CombatLogEntry] { combatLog }
+    func playerFlashAmount() -> Double { min(1.0, max(0, damageFlashTimer / 0.25)) }
 
     // Debug snapshot for HUD
     struct PlayerDebug: Identifiable {
@@ -272,24 +466,56 @@ struct GameDemoView: View {
                 // World rendering
                 ZStack(alignment: .topLeading) {
                     ForEach(vm.colliders(), id: \._stableID) { col in
-                        switch col.type {
-                        case .staticTile:
-                            rect(col.aabb, style: Color.gray.opacity(0.82))
-                        case .movingPlatform:
-                            if vm.isOverheadPlatform(col.id) {
-                                rect(col.aabb, style: Color.purple.opacity(0.9))
-                            } else if vm.isVerticalPlatform(col.id) {
-                                rect(col.aabb, style: Color.blue.opacity(0.85))
-                            } else {
-                                rect(col.aabb, style: Color.cyan.opacity(0.85))
+                        Group {
+                            switch col.type {
+                            case .staticTile:
+                                rect(col.aabb, style: Color.gray.opacity(0.82))
+                            case .movingPlatform:
+                                if vm.isOverheadPlatform(col.id) {
+                                    rect(col.aabb, style: Color.purple.opacity(0.9))
+                                } else if vm.isVerticalPlatform(col.id) {
+                                    rect(col.aabb, style: Color.blue.opacity(0.85))
+                                } else {
+                                    rect(col.aabb, style: Color.cyan.opacity(0.85))
+                                }
+                            case .dynamicEntity:
+                                if vm.isPlayerCollider(col.id) || vm.isEnemyCollider(col.id) {
+                                    EmptyView()
+                                } else {
+                                    rect(col.aabb, style: Color.white.opacity(0.6))
+                                }
+                            case .trigger:
+                                rect(col.aabb, style: Color.orange.opacity(0.3))
                             }
-                        default:
-                            rect(col.aabb, style: Color.white.opacity(0.6))
                         }
                     }
 
+                    ForEach(vm.enemySnapshots(), id: \.id) { enemy in
+                        let color = Color.red.opacity(0.82)
+                        rect(enemy.aabb, style: color)
+                            .overlay(alignment: .topLeading) {
+                                Text(enemyStateLabel(enemy))
+                                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(Color.white.opacity(0.85))
+                                    .padding(2)
+                            }
+                    }
+
                     if let p = vm.playerAABB() {
-                        rect(p, style: Color.green)
+                        let flash = vm.playerFlashAmount()
+                        let color = Color(
+                            red: 0.2 + flash * 0.6,
+                            green: 0.85 - flash * 0.45,
+                            blue: 0.2 + flash * 0.1
+                        )
+                        rect(p, style: color)
+                    }
+
+                    ForEach(vm.projectileSnapshots()) { projectile in
+                        Circle()
+                            .fill(Color.orange.opacity(0.9))
+                            .frame(width: projectile.radius * 2, height: projectile.radius * 2)
+                            .position(x: projectile.position.x, y: projectile.position.y)
                     }
                 }
                 .scaleEffect(scale, anchor: .topLeading)
@@ -310,7 +536,7 @@ struct GameDemoView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
                 // Debug HUD
-                VStack(alignment: .trailing, spacing: 4) {
+                VStack(alignment: .trailing, spacing: 6) {
                     let dbg = vm.playerDebug()
                     Group {
                         Text(String(format: "pos: (%.1f, %.1f)", dbg.position.x, dbg.position.y))
@@ -331,6 +557,31 @@ struct GameDemoView: View {
                     }
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.95))
+
+                    let enemies = vm.enemySnapshots()
+                    if !enemies.isEmpty {
+                        Divider().frame(width: 160)
+                        ForEach(enemies.prefix(3), id: \.id) { enemy in
+                            Text(enemyStateLabel(enemy))
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(Color.red.opacity(0.9))
+                        }
+                        if enemies.count > 3 {
+                            Text("+\(enemies.count - 3) more")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                    }
+
+                    let log = vm.combatEntries()
+                    if !log.isEmpty {
+                        Divider().frame(width: 160)
+                        ForEach(log.prefix(3)) { entry in
+                            Text(entry.message)
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.yellow)
+                        }
+                    }
                 }
                 .padding(8)
                 .background(Color.black.opacity(0.35).blur(radius: 2))
@@ -362,6 +613,34 @@ struct GameDemoView: View {
             .fill(style)
             .frame(width: w, height: h)
             .position(x: aabb.min.x + w * 0.5, y: aabb.min.y + h * 0.5)
+    }
+
+    private func enemyStateLabel(_ snapshot: EnemyController.Snapshot) -> String {
+        let state: String
+        switch snapshot.aiState {
+        case .idle: state = "idle"
+        case .patrolling: state = "patrol"
+        case .chasing: state = "chase"
+        case .fleeing: state = "flee"
+        case .strafing: state = "strafe"
+        }
+        let attack: String
+        switch snapshot.attack {
+        case .none:
+            attack = ""
+        case .punch(_):
+            attack = "punch"
+        case .sword(_):
+            attack = "sword"
+        case .shooter(_):
+            attack = "shot"
+        }
+        let vis = snapshot.targetVisible ? "●" : "○"
+        let facing = snapshot.facing >= 0 ? ">" : "<"
+        if attack.isEmpty {
+            return "\(state) \(facing) \(vis)"
+        }
+        return "\(state) \(attack) \(facing) \(vis)"
     }
 
     private var dragMove: some Gesture {
@@ -405,4 +684,3 @@ private extension Collider {
     GameDemoView()
         .frame(width: 1280, height: 720)
 }
-
