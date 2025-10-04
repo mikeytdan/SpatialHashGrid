@@ -15,7 +15,7 @@ struct MetalLevelPreviewView: View {
     private let renderConfiguration: MetalRenderConfiguration
     private let renderer = MetalRendererBridge()
 
-    @FocusState private var focused: Bool
+    @State private var keyboardFocused = true
 
     init(
         blueprint: LevelBlueprint,
@@ -67,10 +67,8 @@ struct MetalLevelPreviewView: View {
 //                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 //                    .padding([.top, .trailing], 16)
             }
-            .focusable()
-            .focused($focused)
             .onAppear {
-                focused = true
+                keyboardFocused = true
                 runtime.start()
                 renderer.resume()
                 controllerManager.start()
@@ -91,18 +89,7 @@ struct MetalLevelPreviewView: View {
                 controllerManager.onRepeat = nil
                 controllerManager.stop()
             }
-            .onKeyPress(phases: [.down, .up]) { keypress in
-                switch keypress.phase {
-                case .down:
-                    input.handleKeyDown(keypress)
-                    return previewHandles(keypress) ? .handled : .ignored
-                case .up:
-                    input.handleKeyUp(keypress)
-                    return previewHandles(keypress) ? .handled : .ignored
-                default:
-                    return .ignored
-                }
-            }
+            .keyboardInput(focused: $keyboardFocused, onEvent: handleKeyboardEvent)
             .onReceive(runtime.$frameTick) { tick in
                 guard showDebugHUD else {
                     debugSnapshot = nil
@@ -127,6 +114,17 @@ struct MetalLevelPreviewView: View {
             runtime.stop()
             renderer.pause()
             onStop()
+        }
+    }
+
+    private func handleKeyboardEvent(phase: KeyboardInputPhase, event: KeyboardInput) -> Bool {
+        switch phase {
+        case .down:
+            input.handleKeyDown(event)
+            return previewHandles(event)
+        case .up:
+            input.handleKeyUp(event)
+            return previewHandles(event)
         }
     }
 
@@ -222,17 +220,19 @@ struct MetalLevelPreviewView: View {
         .accessibilityLabel(showDebugHUD ? "Hide Debug Info" : "Show Debug Info")
     }
 
-    private func previewHandles(_ keyPress: KeyPress) -> Bool {
-        if keyPress.key == .escape { return true }
+    private func previewHandles(_ input: KeyboardInput) -> Bool {
+        if input.key == .escape { return true }
 
-        switch keyPress.key {
-        case .leftArrow, .rightArrow, .upArrow:
-            return true
-        default:
-            break
+        if let key = input.key {
+            switch key {
+            case .leftArrow, .rightArrow, .upArrow:
+                return true
+            default:
+                break
+            }
         }
 
-        let normalized = keyPress.characters.lowercased()
+        let normalized = input.characters.lowercased()
         return normalized.contains("a") || normalized.contains("d") || normalized.contains("w") || normalized.contains(" ")
     }
 }

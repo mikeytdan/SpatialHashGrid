@@ -9,7 +9,7 @@ struct MapEditorView: View {
     @State private var isPreviewing = false
     @State private var spawnNameDraft: String = ""
     @State private var input = InputController()
-    @FocusState private var focused: Bool
+    @State private var editorFocused = true
 
     private let adapter = MetalLevelPreviewAdapter()
 
@@ -59,8 +59,6 @@ struct MapEditorView: View {
         .onChange(of: viewModel.blueprint.spawnPoints) {
             spawnNameDraft = viewModel.selectedSpawn?.name ?? ""
         }
-        .focusable()
-        .focused($focused)
         .onAppear {
             focusEditor()
         }
@@ -73,21 +71,7 @@ struct MapEditorView: View {
                 }
             }
         }
-        .onKeyPress(phases: [.down, .up]) { kp in
-            switch kp.phase {
-            case .down:
-                input.handleKeyDown(kp)
-                if handleEditorCommand(for: kp) { return .handled }
-                if !isPreviewing { input.drainPressedCommands() }
-                return isHandledKey(kp) ? .handled : .ignored
-            case .up:
-                input.handleKeyUp(kp)
-                if !isPreviewing { input.drainPressedCommands() }
-                return isHandledKey(kp) ? .handled : .ignored
-            default:
-                return .ignored
-            }
-        }
+        .keyboardInput(focused: $editorFocused, onEvent: handleKeyboardEvent)
     }
 
     private var mapStage: some View {
@@ -978,18 +962,21 @@ struct MapEditorView: View {
         }
     }
     
-    private func isHandledKey(_ kp: KeyPress) -> Bool {
+    private func isHandledKey(_ input: KeyboardInput) -> Bool {
         // Any key we map in InputController should return handled.
         // This avoids arrow keys accidentally scrolling a parent scroll view.
-        switch kp.key {
-        case .leftArrow, .rightArrow, .upArrow, .escape:
-            return true
-        default:
-            break
+        if let key = input.key {
+            switch key {
+            case .leftArrow, .rightArrow, .upArrow, .escape, .downArrow:
+                return true
+            default:
+                break
+            }
         }
-        let ch = kp.characters.lowercased()
+
+        let ch = input.characters.lowercased()
         if ch == "a" || ch == "d" || ch == "w" || ch == " " { return true }
-        if kp.modifiers.contains(.command), (ch == "z" || ch == "y" || ch == "r") { return true }
+        if input.modifiers.contains(.command), (ch == "z" || ch == "y" || ch == "r") { return true }
         return false
     }
 
@@ -1196,23 +1183,38 @@ struct MapEditorView: View {
     }
 
     private func focusEditor() {
-        focused = true
+        editorFocused = true
     }
 
     private func focusEditorIfNeeded() {
-        if !focused {
+        if !editorFocused {
             focusEditor()
         }
     }
 
-    private func handleEditorCommand(for keyPress: KeyPress) -> Bool {
-        let normalized = keyPress.characters.lowercased()
-        let hasCommand = keyPress.modifiers.contains(.command)
-        let hasShift = keyPress.modifiers.contains(.shift)
+    @discardableResult
+    private func handleKeyboardEvent(phase: KeyboardInputPhase, event: KeyboardInput) -> Bool {
+        switch phase {
+        case .down:
+            input.handleKeyDown(event)
+            if handleEditorCommand(for: event) { return true }
+            if !isPreviewing { input.drainPressedCommands() }
+            return isHandledKey(event)
+        case .up:
+            input.handleKeyUp(event)
+            if !isPreviewing { input.drainPressedCommands() }
+            return isHandledKey(event)
+        }
+    }
+
+    private func handleEditorCommand(for input: KeyboardInput) -> Bool {
+        let normalized = input.characters.lowercased()
+        let hasCommand = input.modifiers.contains(.command)
+        let hasShift = input.modifiers.contains(.shift)
 
         var action: (() -> Void)?
 
-        if keyPress.key == .escape {
+        if input.key == .escape {
             action = {
                 if isPreviewing {
                     isPreviewing = false
