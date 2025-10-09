@@ -1,13 +1,24 @@
 import Metal
 import MetalKit
 import SwiftUI
+import simd
+
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+// See Docs/DebugVisualizerGuide.md for overlay color legend.
 
 @MainActor
 struct MetalLevelPreviewView: View {
     @StateObject private var runtime: LevelPreviewRuntime
-    @State private var showDebugHUD = false
+    @State private var showDebugHUD = true
     @State private var debugSnapshot: LevelPreviewRuntime.PlayerDebugSnapshot?
+    @State private var debugColliders: [Collider] = []
     @State private var key: String = ""
+    @State private var copyStatus: String?
 
     let input: InputController
     private let onStop: () -> Void
@@ -49,23 +60,22 @@ struct MetalLevelPreviewView: View {
                 )
                 .ignoresSafeArea()
 
-//                instructionOverlay
-//                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-//                    .padding(10)
-//
-//                debugOverlay
-//                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-//                    .padding(10)
-//
-//                controlOverlay
-//
-//                stopButton
-//                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-//                    .padding(16)
-//
-//                debugToggle
-//                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-//                    .padding([.top, .trailing], 16)
+                colliderOverlay
+                    .ignoresSafeArea()
+
+                controlOverlay
+
+                stopButton
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(16)
+
+                debugToggle
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding([.top, .trailing], 16)
+
+                debugOverlay
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(10)
             }
             .onAppear {
                 keyboardFocused = true
@@ -93,17 +103,21 @@ struct MetalLevelPreviewView: View {
             .onReceive(runtime.$frameTick) { tick in
                 guard showDebugHUD else {
                     debugSnapshot = nil
+                    debugColliders = []
                     return
                 }
                 if tick % 3 == 0 {
                     debugSnapshot = runtime.playerDebug()
+                    debugColliders = runtime.colliders()
                 }
             }
             .onChange(of: showDebugHUD) { _, value in
                 if value {
                     debugSnapshot = runtime.playerDebug()
+                    debugColliders = runtime.colliders()
                 } else {
                     debugSnapshot = nil
+                    debugColliders = []
                 }
             }
         }
@@ -152,8 +166,42 @@ struct MetalLevelPreviewView: View {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(String(format: "pos: (%.1f, %.1f)", dbg.position.x, dbg.position.y))
                     Text(String(format: "vel: (%.1f, %.1f)", dbg.velocity.x, dbg.velocity.y))
+                    Text("frame: \(dbg.frameIndex)")
                     Text("grounded: \(dbg.grounded ? "true" : "false")")
                     Text("facing: \(dbg.facing > 0 ? ">" : "<")  jumps: \(dbg.jumpsRemaining)")
+                    Text("green = collider, cyan dash = sweep hull")
+                        .opacity(0.85)
+                    Text("red/yellow = contact sample depth →")
+                        .opacity(0.85)
+                    if let support = dbg.supportContact {
+                        Text(String(format: "support: id %d (%@) depth %.3f", support.other, describeColliderType(support.type), support.depth))
+                        Text(String(format: "normal: (%.2f, %.2f) point: (%.1f, %.1f)", support.normal.x, support.normal.y, support.point.x, support.point.y))
+                    } else {
+                        Text("support: none")
+                            .opacity(0.7)
+                    }
+                    if let tileDebug = dbg.tileOcclusionDebug {
+                        Text(String(format: "tile filter: tile %d ramp %@ reason %@", tileDebug.tileID, tileDebug.rampID.map(String.init) ?? "nil", tileDebug.reason))
+                        Text(String(format: "sameRow:%@ below:%@ left:%@ right:%@ support:%@", tileDebug.sameRow ? "y" : "n", tileDebug.rampBelow ? "y" : "n", tileDebug.adjacentLeft ? "y" : "n", tileDebug.adjacentRight ? "y" : "n", tileDebug.supportID.map { String($0) } ?? "nil"))
+                    }
+                    Text(String(format: "input moveX: %.2f jump:%@", dbg.input.moveX, dbg.input.jumpPressed ? "true" : "false"))
+                    Text(String(format: "slope slide: %@", dbg.input.allowSlopeSlide ? "enabled" : "disabled"))
+                    Text(String(format: "suppress carry: %@", dbg.input.suppressPlatformCarry ? "true" : "false"))
+                    Text("contacts: \(dbg.contactSamples.count)  colliders: \(dbg.colliderContacts.count)")
+                    Text(String(format: "gravity: (%.1f, %.1f)", dbg.worldGravity.x, dbg.worldGravity.y))
+                    Button {
+                        copyDebugInfo(snapshot: dbg, colliders: debugColliders)
+                    } label: {
+                        Label("Copy Debug Info", systemImage: "doc.on.doc")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    if let status = copyStatus {
+                        Text(status)
+                            .font(.caption2)
+                            .foregroundStyle(status.lowercased().contains("failed") ? .red : .green)
+                    }
                 }
                 .font(.system(size: 12, weight: .regular, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.95))
@@ -162,6 +210,142 @@ struct MetalLevelPreviewView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
         }
+    }
+
+    private var colliderOverlay: some View {
+        GeometryReader { proxy in
+            Canvas { context, size in
+                guard showDebugHUD else { return }
+                let params = projectionParameters(for: size)
+                let colliders = debugColliders
+
+                if let dbg = debugSnapshot {
+                    let strongOverlay = Color.red.opacity(0.35)
+                    let lightOverlay = Color.red.opacity(0.18)
+                    for contact in dbg.colliderContacts {
+                        let overlayColor = contact.maxDepth > 0.001 ? strongOverlay : lightOverlay
+                        switch contact.shape {
+                        case .ramp(let rampData):
+                            let path = rampPath(for: contact.aabb, kind: rampData.kind, parameters: params)
+                            context.fill(path, with: .color(overlayColor))
+                        case .capsule(let capsule):
+                            let path = capsulePath(for: contact.aabb, capsule: capsule, parameters: params)
+                            context.fill(path, with: .color(overlayColor))
+                        default:
+                            let rect = screenRect(for: contact.aabb, parameters: params)
+                            let path = Path(rect)
+                            context.fill(path, with: .color(overlayColor))
+                        }
+                    }
+
+                    drawContactSamples(context: &context, params: params, samples: dbg.contactSamples)
+                    drawSolverFoot(context: &context, params: params, debug: dbg)
+                    drawSolverAABB(context: &context, params: params, debug: dbg)
+                }
+
+                for collider in colliders {
+                    let strokeWidth: CGFloat = collider.id == runtime.player.id ? 2.0 : 1.0
+                    let color = colliderColor(for: collider)
+                    switch collider.shape {
+                    case .ramp(let rampData):
+                        let path = rampPath(for: collider.aabb, kind: rampData.kind, parameters: params)
+                        context.stroke(path, with: .color(color.opacity(0.9)), lineWidth: strokeWidth)
+                    case .capsule(let capsule):
+                        let path = capsulePath(for: collider.aabb, capsule: capsule, parameters: params)
+                        context.stroke(path, with: .color(color), lineWidth: strokeWidth)
+                    default:
+                        let rect = screenRect(for: collider.aabb, parameters: params)
+                        let path = Path(rect)
+                        context.stroke(path, with: .color(color.opacity(0.9)), lineWidth: strokeWidth)
+                    }
+                }
+
+                if let dbg = debugSnapshot {
+                    let center = screenPoint(for: dbg.position, parameters: params)
+                    let radius: CGFloat = 3.5
+                    var marker = Path()
+                    marker.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+                    context.fill(marker, with: .color(.red))
+
+                    let velocityEnd = CGPoint(x: center.x + CGFloat(dbg.velocity.x) * 0.02, y: center.y + CGFloat(dbg.velocity.y) * 0.02)
+                    var velocityPath = Path()
+                    velocityPath.move(to: center)
+                    velocityPath.addLine(to: velocityEnd)
+                    context.stroke(velocityPath, with: .color(.red.opacity(0.6)), lineWidth: 1)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func drawContactSamples(
+        context: inout GraphicsContext,
+        params: (offset: CGPoint, scale: CGFloat),
+        samples: [LevelPreviewRuntime.PlayerDebugSnapshot.ContactSample]
+    ) {
+        guard !samples.isEmpty else { return }
+        for sample in samples {
+            let point = screenPoint(for: sample.point, parameters: params)
+            let depth = sample.depth
+            let radius: CGFloat = depth > 0.001 ? 5 : 4
+            var marker = Path()
+            marker.addEllipse(in: CGRect(x: point.x - radius * 0.5, y: point.y - radius * 0.5, width: radius, height: radius))
+            let fillColor: Color = depth > 0.001 ? .red : .yellow
+            context.fill(marker, with: .color(fillColor.opacity(0.9)))
+
+            let normal = sample.normal
+            let baseLength = max(12.0, min(36.0, depth * 800.0))
+            let arrowLength = CGFloat(baseLength)
+            let endPoint = CGPoint(
+                x: point.x + CGFloat(normal.x) * arrowLength,
+                y: point.y + CGFloat(normal.y) * arrowLength
+            )
+            var arrow = Path()
+            arrow.move(to: point)
+            arrow.addLine(to: endPoint)
+            context.stroke(arrow, with: .color(fillColor.opacity(0.9)), lineWidth: depth > 0.001 ? 2 : 1)
+
+            // arrow head
+            let headSize: CGFloat = 5
+            let tangent = CGPoint(x: -CGFloat(normal.y), y: CGFloat(normal.x))
+            var head = Path()
+            head.move(to: endPoint)
+            head.addLine(to: CGPoint(x: endPoint.x - CGFloat(normal.x) * headSize + tangent.x * 0.5, y: endPoint.y - CGFloat(normal.y) * headSize + tangent.y * 0.5))
+            head.move(to: endPoint)
+            head.addLine(to: CGPoint(x: endPoint.x - CGFloat(normal.x) * headSize - tangent.x * 0.5, y: endPoint.y - CGFloat(normal.y) * headSize - tangent.y * 0.5))
+            context.stroke(head, with: .color(fillColor.opacity(0.9)), lineWidth: depth > 0.001 ? 1.5 : 1)
+        }
+    }
+
+    private func drawSolverFoot(
+        context: inout GraphicsContext,
+        params: (offset: CGPoint, scale: CGFloat),
+        debug: LevelPreviewRuntime.PlayerDebugSnapshot
+    ) {
+        guard debug.capsuleRadius > 0 else { return }
+        let radiusWorld = debug.capsuleRadius
+        let offset = max(0, debug.halfSize.y - radiusWorld)
+        let centerWorld = Vec2(debug.position.x, debug.position.y + offset)
+        let center = screenPoint(for: centerWorld, parameters: params)
+        let radiusScreen = CGFloat(radiusWorld) * params.scale
+        var foot = Path()
+        foot.addEllipse(in: CGRect(x: center.x - radiusScreen, y: center.y - radiusScreen, width: radiusScreen * 2, height: radiusScreen * 2))
+        context.stroke(foot, with: .color(.orange.opacity(0.8)), lineWidth: 1.5)
+    }
+
+    private func drawSolverAABB(
+        context: inout GraphicsContext,
+        params: (offset: CGPoint, scale: CGFloat),
+        debug: LevelPreviewRuntime.PlayerDebugSnapshot
+    ) {
+        let halfSize = debug.halfSize
+        let aabb = AABB(
+            min: Vec2(debug.position.x - halfSize.x, debug.position.y - halfSize.y),
+            max: Vec2(debug.position.x + halfSize.x, debug.position.y + halfSize.y)
+        )
+        let rect = screenRect(for: aabb, parameters: params)
+        let path = Path(rect)
+        context.stroke(path, with: .color(Color.cyan.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
     }
 
     private var controlOverlay: some View {
@@ -220,6 +404,113 @@ struct MetalLevelPreviewView: View {
         .accessibilityLabel(showDebugHUD ? "Hide Debug Info" : "Show Debug Info")
     }
 
+    private func projectionParameters(for size: CGSize) -> (offset: CGPoint, scale: CGFloat) {
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+        let worldWidth = max(CGFloat(runtime.worldWidth), 1)
+        let worldHeight = max(CGFloat(runtime.worldHeight), 1)
+        let scale = min(width / worldWidth, height / worldHeight)
+        let offsetX = (width - worldWidth * scale) * 0.5
+        let offsetY = (height - worldHeight * scale) * 0.5
+        return (CGPoint(x: offsetX, y: offsetY), scale)
+    }
+
+    private func screenRect(for aabb: AABB, parameters: (offset: CGPoint, scale: CGFloat)) -> CGRect {
+        let offset = parameters.offset
+        let scale = parameters.scale
+        let minX = offset.x + CGFloat(aabb.min.x) * scale
+        let maxX = offset.x + CGFloat(aabb.max.x) * scale
+        let minY = offset.y + CGFloat(aabb.min.y) * scale
+        let maxY = offset.y + CGFloat(aabb.max.y) * scale
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func screenPoint(for world: Vec2, parameters: (offset: CGPoint, scale: CGFloat)) -> CGPoint {
+        let offset = parameters.offset
+        let scale = parameters.scale
+        let x = offset.x + CGFloat(world.x) * scale
+        let y = offset.y + CGFloat(world.y) * scale
+        return CGPoint(x: x, y: y)
+    }
+
+    private func rampPath(for aabb: AABB, kind: RampData.Kind, parameters: (offset: CGPoint, scale: CGFloat)) -> Path {
+        let offset = parameters.offset
+        let scale = parameters.scale
+        let points: [Vec2]
+        switch kind {
+        case .upRight:
+            points = [
+                Vec2(aabb.min.x, aabb.max.y),
+                Vec2(aabb.max.x, aabb.max.y),
+                Vec2(aabb.max.x, aabb.min.y)
+            ]
+        case .upLeft:
+            points = [
+                Vec2(aabb.max.x, aabb.max.y),
+                Vec2(aabb.min.x, aabb.max.y),
+                Vec2(aabb.min.x, aabb.min.y)
+            ]
+        }
+        let cgPoints = points.map { point -> CGPoint in
+            let x = offset.x + CGFloat(point.x) * scale
+            let y = offset.y + CGFloat(point.y) * scale
+            return CGPoint(x: x, y: y)
+        }
+        var path = Path()
+        if let first = cgPoints.first {
+            path.move(to: first)
+            for point in cgPoints.dropFirst() {
+                path.addLine(to: point)
+            }
+            path.closeSubpath()
+        }
+        return path
+    }
+
+    private func colliderColor(for collider: Collider) -> Color {
+        switch collider.type {
+        case .dynamicEntity:
+            return .green
+        case .movingPlatform:
+            return .orange
+        case .trigger:
+            return .purple
+        case .staticTile:
+            switch collider.shape {
+            case .ramp:
+                return .blue
+            default:
+                return .red
+            }
+        }
+    }
+
+    private func capsulePath(
+        for aabb: AABB,
+        capsule: CapsuleData,
+        parameters: (offset: CGPoint, scale: CGFloat)
+    ) -> Path {
+        let offset = parameters.offset
+        let scale = parameters.scale
+        let radius = CGFloat(capsule.radius) * scale
+        //let height = max(0, CGFloat(capsule.height) * scale)
+        let centerX = offset.x + CGFloat((aabb.min.x + aabb.max.x) * 0.5) * scale
+        let topY = offset.y + CGFloat(aabb.min.y) * scale
+        let bottomY = offset.y + CGFloat(aabb.max.y) * scale
+
+        // let bodyHeight = height
+        let topCenter = CGPoint(x: centerX, y: topY + radius)
+        let bottomCenter = CGPoint(x: centerX, y: bottomY - radius)
+
+        var path = Path()
+        path.addArc(center: topCenter, radius: radius, startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+        path.addLine(to: CGPoint(x: bottomCenter.x + radius, y: bottomCenter.y))
+        path.addArc(center: bottomCenter, radius: radius, startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
+        path.addLine(to: CGPoint(x: topCenter.x - radius, y: topCenter.y))
+        path.closeSubpath()
+        return path
+    }
+
     private func previewHandles(_ input: KeyboardInput) -> Bool {
         if input.key == .escape { return true }
 
@@ -234,6 +525,231 @@ struct MetalLevelPreviewView: View {
 
         let normalized = input.characters.lowercased()
         return normalized.contains("a") || normalized.contains("d") || normalized.contains("w") || normalized.contains(" ")
+    }
+
+    private func copyDebugInfo(snapshot dbg: LevelPreviewRuntime.PlayerDebugSnapshot, colliders: [Collider]) {
+        let export = DebugExport(snapshot: dbg, colliders: colliders)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(export)
+            guard let string = String(data: data, encoding: .utf8) else {
+                copyStatus = "Copy failed (encoding)"
+                resetCopyStatusLater()
+                return
+            }
+#if canImport(UIKit)
+            UIPasteboard.general.string = string
+#elseif canImport(AppKit)
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(string, forType: .string)
+#endif
+            copyStatus = "Copied debug JSON"
+        } catch {
+            copyStatus = "Copy failed: \(error.localizedDescription)"
+        }
+        resetCopyStatusLater()
+    }
+
+    private func resetCopyStatusLater() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            copyStatus = nil
+        }
+    }
+
+    private func describeColliderType(_ type: ColliderType) -> String {
+        switch type {
+        case .staticTile: return "staticTile"
+        case .dynamicEntity: return "dynamicEntity"
+        case .trigger: return "trigger"
+        case .movingPlatform: return "movingPlatform"
+        }
+    }
+
+    private struct DebugExport: Codable {
+        struct Vec: Codable {
+            let x: Double
+            let y: Double
+
+            init(_ v: Vec2) {
+                self.x = v.x
+                self.y = v.y
+            }
+        }
+
+        struct ColliderContactInfo: Codable {
+            let colliderID: ColliderID
+            let maxDepth: Double
+        }
+
+        struct ContactSampleInfo: Codable {
+            let colliderID: ColliderID
+            let point: Vec
+            let normal: Vec
+            let depth: Double
+            let colliderType: String
+            let side: String
+        }
+
+        struct SupportInfo: Codable {
+            let colliderID: ColliderID
+            let normal: Vec
+            let point: Vec
+            let depth: Double
+            let type: String
+        }
+
+        struct InputInfo: Codable {
+            let moveX: Double
+            let jumpPressed: Bool
+            let groundedLastFrame: Bool
+            let suppressPlatformCarry: Bool
+            let allowSlopeSlide: Bool
+        }
+
+        struct TileOcclusionInfo: Codable {
+            let tileID: ColliderID
+            let rampID: ColliderID?
+            let reason: String
+            let contactPoint: Vec
+            let normal: Vec
+            let supportID: ColliderID?
+            let sameRow: Bool
+            let rampBelow: Bool
+            let adjacentLeft: Bool
+            let adjacentRight: Bool
+        }
+
+        struct ShapeInfo: Codable {
+            let kind: String
+            let rampKind: String?
+            let radius: Double?
+            let height: Double?
+        }
+
+        struct ColliderInfo: Codable {
+            let id: ColliderID
+            let type: String
+            let shape: ShapeInfo
+            let aabbMin: Vec
+            let aabbMax: Vec
+            let tag: Int32
+        }
+
+        let frame: Int
+        let playerID: ColliderID
+        let position: Vec
+        let velocity: Vec
+        let grounded: Bool
+        let groundedLastFrame: Bool
+        let support: SupportInfo?
+        let input: InputInfo
+        let worldGravity: Vec
+        let colliderContacts: [ColliderContactInfo]
+        let contactSamples: [ContactSampleInfo]
+        let colliders: [ColliderInfo]
+        let tileOcclusion: TileOcclusionInfo?
+
+        init(snapshot: LevelPreviewRuntime.PlayerDebugSnapshot, colliders: [Collider]) {
+            self.frame = snapshot.frameIndex
+            self.playerID = snapshot.playerID
+            self.position = Vec(snapshot.position)
+            self.velocity = Vec(snapshot.velocity)
+            self.grounded = snapshot.grounded
+            self.groundedLastFrame = snapshot.groundedLastFrame
+            if let supportContact = snapshot.supportContact {
+                self.support = SupportInfo(
+                    colliderID: supportContact.other,
+                    normal: Vec(supportContact.normal),
+                    point: Vec(supportContact.point),
+                    depth: supportContact.depth,
+                    type: DebugExport.describe(colliderType: supportContact.type)
+                )
+            } else {
+                self.support = nil
+            }
+            self.input = InputInfo(
+                moveX: snapshot.input.moveX,
+                jumpPressed: snapshot.input.jumpPressed,
+                groundedLastFrame: snapshot.input.groundedLastFrame,
+                suppressPlatformCarry: snapshot.input.suppressPlatformCarry,
+                allowSlopeSlide: snapshot.input.allowSlopeSlide
+            )
+            self.worldGravity = Vec(snapshot.worldGravity)
+            self.colliderContacts = snapshot.colliderContacts.map { ColliderContactInfo(colliderID: $0.colliderID, maxDepth: $0.maxDepth) }
+            self.contactSamples = snapshot.contactSamples.map {
+                ContactSampleInfo(
+                    colliderID: $0.colliderID,
+                    point: Vec($0.point),
+                    normal: Vec($0.normal),
+                    depth: $0.depth,
+                    colliderType: DebugExport.describe(colliderType: $0.colliderType),
+                    side: DebugExport.describe(side: $0.side)
+                )
+            }
+            self.colliders = colliders.map { collider in
+                ColliderInfo(
+                    id: collider.id,
+                    type: DebugExport.describe(colliderType: collider.type),
+                    shape: DebugExport.describe(shape: collider.shape),
+                    aabbMin: Vec(collider.aabb.min),
+                    aabbMax: Vec(collider.aabb.max),
+                    tag: collider.tag
+                )
+            }
+            if let tileDebug = snapshot.tileOcclusionDebug {
+                self.tileOcclusion = TileOcclusionInfo(
+                    tileID: tileDebug.tileID,
+                    rampID: tileDebug.rampID,
+                    reason: tileDebug.reason,
+                    contactPoint: Vec(tileDebug.contactPoint),
+                    normal: Vec(tileDebug.normal),
+                    supportID: tileDebug.supportID,
+                    sameRow: tileDebug.sameRow,
+                    rampBelow: tileDebug.rampBelow,
+                    adjacentLeft: tileDebug.adjacentLeft,
+                    adjacentRight: tileDebug.adjacentRight
+                )
+            } else {
+                self.tileOcclusion = nil
+            }
+        }
+
+        private static func describe(colliderType: ColliderType) -> String {
+            switch colliderType {
+            case .staticTile: return "staticTile"
+            case .dynamicEntity: return "dynamicEntity"
+            case .trigger: return "trigger"
+            case .movingPlatform: return "movingPlatform"
+            }
+        }
+
+        private static func describe(side: CollisionSide) -> String {
+            switch side {
+            case .ground: return "ground"
+            case .ceiling: return "ceiling"
+            case .left: return "left"
+            case .right: return "right"
+            }
+        }
+
+        private static func describe(shape: Shape) -> ShapeInfo {
+            switch shape {
+            case .aabb:
+                return ShapeInfo(kind: "aabb", rampKind: nil, radius: nil, height: nil)
+            case .ramp(let data):
+                let kind: String = {
+                    switch data.kind {
+                    case .upRight: return "upRight"
+                    case .upLeft: return "upLeft"
+                    }
+                }()
+                return ShapeInfo(kind: "ramp", rampKind: kind, radius: nil, height: nil)
+            case .capsule(let capsule):
+                return ShapeInfo(kind: "capsule", rampKind: nil, radius: capsule.radius, height: capsule.height)
+            }
+        }
     }
 }
 

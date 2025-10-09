@@ -21,6 +21,17 @@ enum PlatformColors {
         Color.gray.opacity(0.15)
         #endif
     }
+
+    /// Neutral workspace background for editor surfaces.
+    static var workspaceBackground: Color {
+        #if canImport(UIKit)
+        Color(.systemGroupedBackground)
+        #elseif canImport(AppKit)
+        Color(nsColor: .windowBackgroundColor)
+        #else
+        Color.gray.opacity(0.08)
+        #endif
+    }
 }
 
 /// Lightweight bridge around platform-specific image types that exposes a common CGImage.
@@ -262,8 +273,10 @@ private final class KeyboardCaptureView: NSView {
     }
 
     func ensureFocus() {
-        guard window?.firstResponder !== self else { return }
-        window?.makeFirstResponder(self)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window?.firstResponder !== self else { return }
+            self.window?.makeFirstResponder(self)
+        }
     }
 
     override func keyDown(with event: NSEvent) {

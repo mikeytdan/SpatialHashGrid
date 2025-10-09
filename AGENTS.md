@@ -5,6 +5,7 @@
 
 ## Build, Test, and Development Commands
 Do not build the project yourself; the user will run all builds locally.
+Do not run tests in project yourself; the user will run all tests locally.
 Open `SpatialHashGrid.xcodeproj` in Xcode 16+ targeting the iOS simulator. From the CLI, a full debug build runs via:
 ```bash
 xcodebuild -project SpatialHashGrid.xcodeproj -scheme SpatialHashGrid -destination 'platform=iOS Simulator,name=iPhone 17' -configuration Debug build
@@ -23,3 +24,6 @@ Logic tests rely on the Swift Testing DSL (`@Test`, `#expect`). Name each `@Test
 
 ## Commit & Pull Request Guidelines
 Recent history favors concise, sentence-case summaries with optional feature prefixes (`Spatial hash demo: ...`). Write commit titles in the imperative mood and keep bodies focused on rationale or performance notes. Pull requests should call out affected modules, simulator targets used for validation, and attach GIFs or screenshots when UI behavior changes. Link issue numbers with `Fixes #123` so automation can close threads.
+
+## Ramp Collision Notes
+See `Docs/RampCollisionNotes.md` for the current understanding of ramp movement edge cases, ramp occlusion heuristics, and the regression tests (`movingUpRightRampIgnoresSupportTileBeneath`, `movingDownLeftRampIgnoresSupportTileBeneath`, `climbingOffsetRampsSkipsCornerTile`, `descendingOffsetRampsStaysOnSurface`, `climbingOffsetLeftRampsSkipsCornerTile`, `descendingOffsetLeftRampsStaysOnSurface`, `horizontalContactWithCornerTileRemainsSolid`, `horizontalContactWithLeftCornerTileRemainsSolid`, `descendingRampPairWithSupportTileAllowsLeftwardMovement`) to run after touching the slope resolver.

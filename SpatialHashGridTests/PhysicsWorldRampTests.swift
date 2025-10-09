@@ -114,6 +114,43 @@ struct PhysicsWorldRampTests {
     }
 
     @Test
+    func movingUpRightRampIgnoresSupportTileBeneath() {
+        let tileSize = 32.0
+        let world = PhysicsWorld(cellSize: tileSize)
+        let rampAABB = AABB(min: Vec2(0, tileSize), max: Vec2(tileSize, tileSize * 2))
+        _ = world.addStaticRamp(aabb: rampAABB, kind: .upRight)
+        let supportTile = AABB(min: Vec2(0, tileSize * 2), max: Vec2(tileSize, tileSize * 3))
+        _ = world.addStaticTile(aabb: supportTile)
+
+        let halfSize = Vec2(8, 12)
+        var state = PhysicsWorld.BodyState(
+            position: Vec2(rampAABB.min.x + halfSize.x,
+                            rampAABB.max.y - halfSize.y - 0.5),
+            velocity: Vec2(200, 0),
+            size: halfSize,
+            capsuleRadius: halfSize.x
+        )
+        let capsuleShape = Shape.capsule(CapsuleData(radius: halfSize.x, height: max(0, (halfSize.y * 2) - 2 * halfSize.x)))
+        let id = world.addDynamicEntity(aabb: aabb(for: state), shape: capsuleShape)
+
+        var contacts: [Contact] = []
+        let dt = 1.0 / 60.0
+        let initialX = state.position.x
+        for _ in 0..<18 {
+            world.integrateKinematic(id: id, state: &state, dt: dt, outContacts: &contacts)
+        }
+
+        let planePoint = Vec2(rampAABB.min.x, rampAABB.max.y)
+        let normal = rampNormal(ramp: rampAABB, kind: .upRight)
+        let footCenter = Vec2(state.position.x, state.position.y + (halfSize.y - halfSize.x))
+        #expect(abs(simd_dot(footCenter - planePoint, normal) - halfSize.x) < 0.2)
+        #expect(state.position.x > initialX + tileSize * 0.5)
+        #expect(state.position.y < rampAABB.max.y - halfSize.y)
+        #expect(state.velocity.x > 0)
+        #expect(state.velocity.y <= 1e-3)
+    }
+
+    @Test
     func movingDownUpLeftRampTracksSurface() {
         let tileSize = 32.0
         let world = PhysicsWorld(cellSize: tileSize)
@@ -147,6 +184,71 @@ struct PhysicsWorldRampTests {
         #expect(state.position.y > initialY)
         #expect(state.velocity.x > 0)
         #expect(state.velocity.y <= 1e-3)
+    }
+
+    @Test
+    func descendingOffsetLeftRampsStaysOnSurface() {
+        let tileSize = 32.0
+        let world = PhysicsWorld(cellSize: tileSize)
+        let rampAABB = AABB(min: Vec2(tileSize, tileSize), max: Vec2(tileSize * 2, tileSize * 2))
+        _ = world.addStaticRamp(aabb: rampAABB, kind: .upLeft)
+        let supportTile = AABB(min: Vec2(tileSize, tileSize * 2), max: Vec2(tileSize * 2, tileSize * 3))
+        _ = world.addStaticTile(aabb: supportTile)
+
+        let halfSize = Vec2(8, 12)
+        var state = PhysicsWorld.BodyState(
+            position: Vec2(rampAABB.min.x + halfSize.x + 2.0,
+                            rampAABB.min.y + halfSize.y + 0.5),
+            velocity: Vec2(150, 0),
+            size: halfSize,
+            capsuleRadius: halfSize.x
+        )
+        let capsuleShape = Shape.capsule(CapsuleData(radius: halfSize.x, height: max(0, (halfSize.y * 2) - 2 * halfSize.x)))
+        let id = world.addDynamicEntity(aabb: aabb(for: state), shape: capsuleShape)
+
+        var contacts: [Contact] = []
+        let dt = 1.0 / 60.0
+        let initialY = state.position.y
+        for _ in 0..<18 {
+            world.integrateKinematic(id: id, state: &state, dt: dt, outContacts: &contacts)
+        }
+
+        let planePoint = Vec2(rampAABB.max.x, rampAABB.max.y)
+        let normal = rampNormal(ramp: rampAABB, kind: .upLeft)
+        let footCenter = Vec2(state.position.x, state.position.y + (halfSize.y - halfSize.x))
+        #expect(abs(simd_dot(footCenter - planePoint, normal) - halfSize.x) < 0.2)
+        #expect(state.position.x > rampAABB.min.x + tileSize * 0.5)
+        #expect(state.position.y > initialY)
+        #expect(state.velocity.x > 0)
+        #expect(state.velocity.y <= 1e-3)
+    }
+
+    @Test
+    func walkingOffTileCornerDoesNotStick() {
+        let tileSize = 32.0
+        let world = PhysicsWorld(cellSize: tileSize)
+        let groundTile = AABB(min: Vec2(0, tileSize * 2), max: Vec2(tileSize, tileSize * 3))
+        _ = world.addStaticTile(aabb: groundTile)
+
+        let halfSize = Vec2(8, 12)
+        var state = PhysicsWorld.BodyState(
+            position: Vec2(groundTile.min.x + halfSize.x,
+                            groundTile.min.y - halfSize.y - 0.5),
+            velocity: Vec2(220, 0),
+            size: halfSize,
+            capsuleRadius: halfSize.x
+        )
+        let capsuleShape = Shape.capsule(CapsuleData(radius: halfSize.x, height: max(0, (halfSize.y * 2) - 2 * halfSize.x)))
+        let id = world.addDynamicEntity(aabb: aabb(for: state), shape: capsuleShape)
+
+        var contacts: [Contact] = []
+        let dt = 1.0 / 60.0
+        for _ in 0..<18 {
+            world.integrateKinematic(id: id, state: &state, dt: dt, outContacts: &contacts)
+        }
+
+        #expect(state.position.x > groundTile.max.x + halfSize.x * 0.5)
+        #expect(state.velocity.x > 150)
     }
 
     private func aabb(for state: PhysicsWorld.BodyState) -> AABB {

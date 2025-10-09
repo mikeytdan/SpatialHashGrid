@@ -531,6 +531,10 @@ struct LevelBlueprint {
         spawnPoints.first(where: { $0.id == id })
     }
 
+    func spawn(at point: GridPoint) -> PlayerSpawnPoint? {
+        spawnPoints.first(where: { $0.coordinate == point })
+    }
+
     mutating func renameSpawn(id: PlayerSpawnPoint.ID, to name: String) {
         guard let index = spawnPoints.firstIndex(where: { $0.id == id }) else { return }
         spawnPoints[index].name = name
@@ -663,6 +667,41 @@ struct LevelBlueprint {
 
     func enemy(at point: GridPoint) -> EnemyBlueprint? {
         enemies.first(where: { $0.coordinate == point })
+    }
+}
+
+extension LevelBlueprint {
+    mutating func resize(rows newRows: Int, columns newColumns: Int) {
+        let clampedRows = max(1, newRows)
+        let clampedColumns = max(1, newColumns)
+        rows = clampedRows
+        columns = clampedColumns
+
+        tiles = tiles.filter { contains($0.key) }
+        spawnPoints = spawnPoints.filter { contains($0.coordinate) }
+        sentries = sentries.filter { contains($0.coordinate) }
+        enemies = enemies.filter { contains($0.coordinate) }
+        movingPlatforms = movingPlatforms.filter { platformFits($0) }
+    }
+
+    mutating func updateTileSize(_ size: Double) {
+        tileSize = max(4.0, size)
+    }
+
+    private func platformFits(_ platform: MovingPlatformBlueprint) -> Bool {
+        let origin = platform.origin
+        let target = platform.target
+        let size = platform.size
+        guard placementFits(origin: origin, size: size), placementFits(origin: target, size: size) else {
+            return false
+        }
+        return true
+    }
+
+    private func placementFits(origin: GridPoint, size: GridSize) -> Bool {
+        guard contains(origin) else { return false }
+        let maxPoint = GridPoint(row: origin.row + size.rows - 1, column: origin.column + size.columns - 1)
+        return contains(maxPoint)
     }
 }
 

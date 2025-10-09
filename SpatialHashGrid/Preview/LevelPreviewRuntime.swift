@@ -42,6 +42,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     private var enemyColorIndices: [ColliderID: Int] = [:]
     private var playerAppearance: CharacterVisualOptions?
     private var lastAppliedVisualSize: CGSize = .zero
+    private var lastDebugInputSample: (moveX: Double, jump: Bool, groundedLastFrame: Bool, suppressCarry: Bool) = (0, false, false, false)
 
     private struct PlatformRuntimeState {
         let blueprint: MovingPlatformBlueprint
@@ -127,7 +128,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         let spawnPoint = blueprint.spawnPoints.first?.coordinate ?? GridPoint(row: blueprint.rows - 3, column: 2)
         let spawnPosition = LevelPreviewRuntime.worldPosition(for: spawnPoint, tileSize: blueprint.tileSize)
         player = CharacterController(world: world, spawn: spawnPosition)
-        player.moveSpeed = 800
+        player.moveSpeed = 500
 //        player.moveSpeed = 1500
         player.wallSlideSpeed = 220
 //        player.jumpImpulse = 700
@@ -136,6 +137,7 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         player.extraJumps = 1
         player.coyoteTime = 0.12
         player.groundFriction = 12.0
+        player.allowSlopeSlide = false
 
         buildMovingPlatforms()
         buildSentries()
@@ -180,6 +182,12 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         jumpQueued = false
         let input = InputState(moveX: moveAxis, jumpPressed: jump)
         player.update(input: input, dt: dt)
+        lastDebugInputSample = (
+            moveAxis,
+            jump,
+            player.wasGroundedLastFrame,
+            player.isSuppressingPlatformCarry
+        )
         updateEnemies(dt: dt)
         updateSentries(dt: dt)
         updateProjectiles(dt: dt)
@@ -215,10 +223,67 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     func playerDebug() -> PlayerDebugSnapshot {
         let aabb = world.collider(for: player.id)?.aabb
         let center = aabb?.center ?? player.body.position
+
+        var colliderContacts: [PlayerDebugSnapshot.ColliderContact] = []
+        colliderContacts.reserveCapacity(player.collisions.all.count)
+        var colliderIndex: [ColliderID: Int] = [:]
+        var samples: [PlayerDebugSnapshot.ContactSample] = []
+        samples.reserveCapacity(player.collisions.all.count)
+
+        for surface in player.collisions.all {
+            guard let collider = world.collider(for: surface.other) else { continue }
+            samples.append(
+                PlayerDebugSnapshot.ContactSample(
+                    colliderID: collider.id,
+                    point: surface.point,
+                    normal: surface.normal,
+                    depth: surface.depth,
+                    side: surface.side,
+                    colliderType: collider.type
+                )
+            )
+
+            if let idx = colliderIndex[collider.id] {
+                colliderContacts[idx].maxDepth = max(colliderContacts[idx].maxDepth, surface.depth)
+            } else {
+                let contact = PlayerDebugSnapshot.ColliderContact(
+                    colliderID: collider.id,
+                    aabb: collider.aabb,
+                    shape: collider.shape,
+                    maxDepth: surface.depth
+                )
+                colliderIndex[collider.id] = colliderContacts.count
+                colliderContacts.append(contact)
+            }
+        }
+
+        let inputSnapshot = PlayerDebugSnapshot.InputSnapshot(
+            moveX: lastDebugInputSample.moveX,
+            jumpPressed: lastDebugInputSample.jump,
+            groundedLastFrame: lastDebugInputSample.groundedLastFrame,
+            suppressPlatformCarry: lastDebugInputSample.suppressCarry,
+            allowSlopeSlide: player.allowSlopeSlide
+        )
+
+        let tileDebug = world.latestTileOcclusionDebugInfo().map { info in
+            PlayerDebugSnapshot.TileOcclusionDebug(
+                tileID: info.tileID,
+                rampID: info.rampID,
+                reason: info.reason,
+                contactPoint: info.contactPoint,
+                normal: info.normal,
+                supportID: info.supportID,
+                sameRow: info.sameRow,
+                rampBelow: info.rampBelow,
+                adjacentLeft: info.adjacentLeft,
+                adjacentRight: info.adjacentRight
+            )
+        }
+
         return PlayerDebugSnapshot(
             position: center,
             velocity: player.body.velocity,
-            grounded: player.collisions.grounded,
+            grounded: player.supportContact != nil,
             wallLeft: player.collisions.wallLeft,
             wallRight: player.collisions.wallRight,
             ceiling: player.collisions.ceilingFlag,
@@ -226,7 +291,18 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
             coyoteTimer: player.coyoteTimer,
             jumpsRemaining: player.jumpsRemaining,
             groundID: player.collisions.groundID,
-            facing: player.facing
+            facing: player.facing,
+            halfSize: player.body.size,
+            capsuleRadius: player.body.capsuleRadius,
+            colliderContacts: colliderContacts,
+            contactSamples: samples,
+            supportContact: player.supportContact,
+            input: inputSnapshot,
+            frameIndex: frameTick,
+            worldGravity: world.gravity,
+            playerID: player.id,
+            groundedLastFrame: player.wasGroundedLastFrame,
+            tileOcclusionDebug: tileDebug
         )
     }
 
@@ -280,6 +356,46 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
     }
 
     struct PlayerDebugSnapshot: Identifiable {
+        struct ColliderContact: Identifiable {
+            let colliderID: ColliderID
+            let aabb: AABB
+            let shape: Shape
+            var maxDepth: Double
+
+            var id: ColliderID { colliderID }
+        }
+
+        struct ContactSample: Identifiable {
+            let id = UUID()
+            let colliderID: ColliderID
+            let point: Vec2
+            let normal: Vec2
+            let depth: Double
+            let side: CollisionSide
+            let colliderType: ColliderType
+        }
+
+        struct InputSnapshot {
+            let moveX: Double
+            let jumpPressed: Bool
+            let groundedLastFrame: Bool
+            let suppressPlatformCarry: Bool
+            let allowSlopeSlide: Bool
+        }
+
+        struct TileOcclusionDebug {
+            let tileID: ColliderID
+            let rampID: ColliderID?
+            let reason: String
+            let contactPoint: Vec2
+            let normal: Vec2
+            let supportID: ColliderID?
+            let sameRow: Bool
+            let rampBelow: Bool
+            let adjacentLeft: Bool
+            let adjacentRight: Bool
+        }
+
         let id = UUID()
         let position: Vec2
         let velocity: Vec2
@@ -292,6 +408,17 @@ final class LevelPreviewRuntime: ObservableObject, LevelPreviewLifecycle {
         let jumpsRemaining: Int
         let groundID: ColliderID?
         let facing: Int
+        let halfSize: Vec2
+        let capsuleRadius: Double
+        let colliderContacts: [ColliderContact]
+        let contactSamples: [ContactSample]
+        let supportContact: SurfaceContact?
+        let input: InputSnapshot
+        let frameIndex: Int
+        let worldGravity: Vec2
+        let playerID: ColliderID
+        let groundedLastFrame: Bool
+        let tileOcclusionDebug: TileOcclusionDebug?
     }
 
     static func worldPosition(for point: GridPoint, tileSize: Double) -> Vec2 {

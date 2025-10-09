@@ -18,6 +18,7 @@ struct MapCanvasView: View {
     let selectedEnemyID: EnemyBlueprint.ID?
     let previewColor: Color
     let hoveredPoint: GridPoint?
+    let selectionState: MapEditorSelectionRenderState?
     let onHover: (GridPoint?) -> Void
     let onDragBegan: (GridPoint) -> Void
     let onDragChanged: (GridPoint) -> Void
@@ -34,9 +35,31 @@ struct MapCanvasView: View {
 
             Canvas { context, _ in
                 let rect = CGRect(origin: origin, size: mapSize)
-                context.fill(Path(rect), with: .color(Color.black.opacity(0.85)))
+                context.fill(Path(rect), with: .color(PlatformColors.secondaryBackground))
+                context.stroke(Path(rect), with: .color(Color.black.opacity(0.1)), lineWidth: 1)
+
+                let selection = selectionState
+                let suppressOriginalSelection: Bool
+                if let selection {
+                    suppressOriginalSelection = selection.source == .existing && (selection.offset.row != 0 || selection.offset.column != 0)
+                } else {
+                    suppressOriginalSelection = false
+                }
+
+                let selectedTiles = selection?.tiles ?? [:]
+                let selectedTilePoints = Set(selectedTiles.keys)
+                let selectedSpawnIDs = Set(selection?.spawns.map(\.id) ?? [])
+                let selectedPlatformIDs = Set(selection?.platforms.map(\.id) ?? [])
+                let selectedSentryIDs = Set(selection?.sentries.map(\.id) ?? [])
+                let selectedEnemyIDs = Set(selection?.enemies.map(\.id) ?? [])
+
+                let spawnIndexMap = Dictionary(uniqueKeysWithValues: blueprint.spawnPoints.enumerated().map { ($1.id, $0) })
+                let platformIndexMap = Dictionary(uniqueKeysWithValues: blueprint.movingPlatforms.enumerated().map { ($1.id, $0) })
+                let sentryIndexMap = Dictionary(uniqueKeysWithValues: blueprint.sentries.enumerated().map { ($1.id, $0) })
+                let enemyIndexMap = Dictionary(uniqueKeysWithValues: blueprint.enemies.enumerated().map { ($1.id, $0) })
 
                 for (point, kind) in blueprint.tileEntries() where kind.isSolid {
+                    if suppressOriginalSelection && selectedTilePoints.contains(point) { continue }
                     let tileRect = CGRect(
                         x: origin.x + CGFloat(point.column) * tileSize,
                         y: origin.y + CGFloat(point.row) * tileSize,
@@ -72,6 +95,7 @@ struct MapCanvasView: View {
                 }
 
                 for (index, platform) in blueprint.movingPlatforms.enumerated() {
+                    if suppressOriginalSelection && selectedPlatformIDs.contains(platform.id) { continue }
                     let color = PlatformPalette.color(for: index)
                     let originRect = rectForPlatform(origin: platform.origin, size: platform.size, originPoint: origin, tileSize: tileSize)
                     context.fill(Path(originRect), with: .color(color.opacity(0.6)))
@@ -90,6 +114,7 @@ struct MapCanvasView: View {
                 }
 
                 for (index, spawn) in blueprint.spawnPoints.enumerated() {
+                    if suppressOriginalSelection && selectedSpawnIDs.contains(spawn.id) { continue }
                     let tileRect = CGRect(
                         x: origin.x + CGFloat(spawn.coordinate.column) * tileSize,
                         y: origin.y + CGFloat(spawn.coordinate.row) * tileSize,
@@ -105,10 +130,12 @@ struct MapCanvasView: View {
                 }
 
                 for (index, enemy) in blueprint.enemies.enumerated() {
+                    if suppressOriginalSelection && selectedEnemyIDs.contains(enemy.id) { continue }
                     drawEnemy(enemy, index: index, origin: origin, tileSize: tileSize, context: &context)
                 }
 
                 for (index, sentry) in blueprint.sentries.enumerated() {
+                    if suppressOriginalSelection && selectedSentryIDs.contains(sentry.id) { continue }
                     drawSentry(
                         sentry,
                         index: index,
@@ -130,6 +157,19 @@ struct MapCanvasView: View {
                     }
                 }
 
+                if let selection {
+                    drawSelectionOverlay(
+                        selection: selection,
+                        origin: origin,
+                        tileSize: tileSize,
+                        spawnIndexMap: spawnIndexMap,
+                        platformIndexMap: platformIndexMap,
+                        sentryIndexMap: sentryIndexMap,
+                        enemyIndexMap: enemyIndexMap,
+                        context: &context
+                    )
+                }
+
                 if showGrid {
                     drawGrid(context: &context, origin: origin, tileSize: tileSize, mapSize: mapSize)
                 }
@@ -145,7 +185,7 @@ struct MapCanvasView: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(dragGesture(origin: origin, tileSize: tileSize, mapSize: mapSize))
+            .highPriorityGesture(dragGesture(origin: origin, tileSize: tileSize, mapSize: mapSize))
             .onHover { hovering in
 #if os(macOS)
                 if !hovering {
@@ -157,8 +197,8 @@ struct MapCanvasView: View {
     }
 
     private func tilePixelSize(in size: CGSize) -> CGFloat {
-        let base = min(size.width / CGFloat(blueprint.columns), size.height / CGFloat(blueprint.rows))
-        return base * CGFloat(zoom)
+        _ = size
+        return max(4.0, CGFloat(blueprint.tileSize) * CGFloat(zoom))
     }
 
     private func dragGesture(origin: CGPoint, tileSize: CGFloat, mapSize: CGSize) -> some Gesture {
@@ -222,6 +262,135 @@ struct MapCanvasView: View {
             path.addLine(to: CGPoint(x: origin.x + mapSize.width, y: y))
         }
         context.stroke(path, with: .color(gridColor), lineWidth: 1)
+    }
+
+    private func drawSelectionOverlay(
+        selection: MapEditorSelectionRenderState,
+        origin: CGPoint,
+        tileSize: CGFloat,
+        spawnIndexMap: [PlayerSpawnPoint.ID: Int],
+        platformIndexMap: [MovingPlatformBlueprint.ID: Int],
+        sentryIndexMap: [SentryBlueprint.ID: Int],
+        enemyIndexMap: [EnemyBlueprint.ID: Int],
+        context: inout GraphicsContext
+    ) {
+        let offset = selection.offset
+        let hasOffset = offset.row != 0 || offset.column != 0
+        let accent = Color.accentColor.opacity(0.9)
+
+        if !selection.tiles.isEmpty {
+            let fillOpacity = hasOffset ? 0.6 : 0.28
+            for (point, kind) in selection.tiles {
+                let destination = GridPoint(row: point.row + offset.row, column: point.column + offset.column)
+                guard blueprint.contains(destination) else { continue }
+                let tileRect = CGRect(
+                    x: origin.x + CGFloat(destination.column) * tileSize,
+                    y: origin.y + CGFloat(destination.row) * tileSize,
+                    width: tileSize,
+                    height: tileSize
+                )
+                let path = Path(tileRect)
+                context.fill(path, with: .color(kind.fillColor.opacity(fillOpacity)))
+                context.stroke(path, with: .color(accent), lineWidth: 1.5)
+            }
+        }
+
+        for spawn in selection.spawns {
+            let destination = spawn.coordinate.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            guard blueprint.contains(destination) else { continue }
+            let index = spawnIndexMap[spawn.id] ?? 0
+            let tileRect = CGRect(
+                x: origin.x + CGFloat(destination.column) * tileSize,
+                y: origin.y + CGFloat(destination.row) * tileSize,
+                width: tileSize,
+                height: tileSize
+            )
+            let inset = tileRect.insetBy(dx: tileSize * 0.25, dy: tileSize * 0.25)
+            let path = Path(ellipseIn: inset)
+            let fill = SpawnPalette.color(for: index).opacity(hasOffset ? 0.7 : 0.35)
+            context.fill(path, with: .color(fill))
+            context.stroke(path, with: .color(accent), lineWidth: 2)
+        }
+
+        for platform in selection.platforms {
+            guard let index = platformIndexMap[platform.id] else { continue }
+            let originPoint = platform.origin.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            let targetPoint = platform.target.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            let originMax = GridPoint(row: originPoint.row + platform.size.rows - 1, column: originPoint.column + platform.size.columns - 1)
+            let targetMax = GridPoint(row: targetPoint.row + platform.size.rows - 1, column: targetPoint.column + platform.size.columns - 1)
+            guard blueprint.contains(originPoint), blueprint.contains(originMax), blueprint.contains(targetPoint), blueprint.contains(targetMax) else { continue }
+
+            let color = PlatformPalette.color(for: index)
+            let originRect = rectForPlatform(origin: originPoint, size: platform.size, originPoint: origin, tileSize: tileSize)
+            context.fill(Path(originRect), with: .color(color.opacity(hasOffset ? 0.55 : 0.28)))
+            context.stroke(Path(originRect), with: .color(accent), lineWidth: 2)
+
+            let targetRect = rectForPlatform(origin: targetPoint, size: platform.size, originPoint: origin, tileSize: tileSize)
+            if targetPoint != originPoint {
+                var path = Path()
+                path.move(to: originRect.center)
+                path.addLine(to: targetRect.center)
+                context.stroke(path, with: .color(accent.opacity(0.7)), lineWidth: 2)
+            }
+            context.stroke(Path(targetRect), with: .color(accent.opacity(0.8)), lineWidth: 1.5)
+        }
+
+        for sentry in selection.sentries {
+            let destination = sentry.coordinate.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            guard blueprint.contains(destination) else { continue }
+            let index = sentryIndexMap[sentry.id] ?? 0
+            let center = CGPoint(
+                x: origin.x + (CGFloat(destination.column) + 0.5) * tileSize,
+                y: origin.y + (CGFloat(destination.row) + 0.5) * tileSize
+            )
+            let baseRadius = tileSize * 0.35
+            let circle = CGRect(x: center.x - baseRadius, y: center.y - baseRadius, width: baseRadius * 2, height: baseRadius * 2)
+            let path = Path(ellipseIn: circle)
+            context.fill(path, with: .color(SentryPalette.color(for: index).opacity(hasOffset ? 0.65 : 0.32)))
+            context.stroke(path, with: .color(accent), lineWidth: 2)
+        }
+
+        for enemy in selection.enemies {
+            let destination = enemy.coordinate.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            guard blueprint.contains(destination) else { continue }
+            let index = enemyIndexMap[enemy.id] ?? 0
+            let color = EnemyPalette.color(for: index)
+            let tileSizeValue = max(Double(tileSize), 1.0)
+            let widthScale = min(max(enemy.size.x / tileSizeValue, 0.4), 1.8)
+            let heightScale = min(max(enemy.size.y / tileSizeValue, 0.6), 2.1)
+            let drawWidth = tileSize * CGFloat(widthScale)
+            let drawHeight = tileSize * CGFloat(heightScale)
+            let center = CGPoint(
+                x: origin.x + (CGFloat(destination.column) + 0.5) * tileSize,
+                y: origin.y + (CGFloat(destination.row) + 0.5) * tileSize
+            )
+            let rect = CGRect(
+                x: center.x - drawWidth * 0.5,
+                y: center.y - drawHeight * 0.5,
+                width: drawWidth,
+                height: drawHeight
+            )
+            let path = Path(roundedRect: rect, cornerRadius: min(drawWidth, drawHeight) * 0.2)
+            context.fill(path, with: .color(color.opacity(hasOffset ? 0.66 : 0.34)))
+            context.stroke(path, with: .color(accent), lineWidth: 2)
+        }
+
+        let adjustedBounds = selection.bounds.offsetting(by: selection.offset)
+        if adjustedBounds.isValid {
+            let selectionRect = CGRect(
+                x: origin.x + CGFloat(adjustedBounds.minColumn) * tileSize,
+                y: origin.y + CGFloat(adjustedBounds.minRow) * tileSize,
+                width: CGFloat(adjustedBounds.width) * tileSize,
+                height: CGFloat(adjustedBounds.height) * tileSize
+            )
+            let outline = Path(selectionRect)
+            let dashLength = max(2.0, tileSize * 0.35)
+            context.stroke(
+                outline,
+                with: .color(accent),
+                style: StrokeStyle(lineWidth: 2, dash: [dashLength, dashLength])
+            )
+        }
     }
 
     private func drawSentry(

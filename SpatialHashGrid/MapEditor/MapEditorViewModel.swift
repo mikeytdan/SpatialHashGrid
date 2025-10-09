@@ -4,8 +4,62 @@
 import Combine
 import SwiftUI
 
+struct MapEditorSelectionOffset: Equatable {
+    var row: Int
+    var column: Int
+
+    static let zero = MapEditorSelectionOffset(row: 0, column: 0)
+
+    func adding(row deltaRow: Int, column deltaColumn: Int) -> MapEditorSelectionOffset {
+        MapEditorSelectionOffset(row: row + deltaRow, column: column + deltaColumn)
+    }
+}
+
+struct MapEditorSelectionBounds: Equatable {
+    var minRow: Int
+    var maxRow: Int
+    var minColumn: Int
+    var maxColumn: Int
+
+    var width: Int { max(0, maxColumn - minColumn + 1) }
+    var height: Int { max(0, maxRow - minRow + 1) }
+
+    var isValid: Bool { minRow <= maxRow && minColumn <= maxColumn }
+
+    func contains(_ point: GridPoint) -> Bool {
+        guard isValid else { return false }
+        return point.row >= minRow && point.row <= maxRow && point.column >= minColumn && point.column <= maxColumn
+    }
+
+    func offsetting(by offset: MapEditorSelectionOffset) -> MapEditorSelectionBounds {
+        MapEditorSelectionBounds(
+            minRow: minRow + offset.row,
+            maxRow: maxRow + offset.row,
+            minColumn: minColumn + offset.column,
+            maxColumn: maxColumn + offset.column
+        )
+    }
+}
+
+struct MapEditorSelectionRenderState {
+    let bounds: MapEditorSelectionBounds
+    let offset: MapEditorSelectionOffset
+    let tiles: [GridPoint: LevelTileKind]
+    let spawns: [PlayerSpawnPoint]
+    let platforms: [MovingPlatformBlueprint]
+    let sentries: [SentryBlueprint]
+    let enemies: [EnemyBlueprint]
+    let mask: MapEditorViewModel.SelectionMask
+    let source: MapEditorViewModel.MultiSelection.Source
+
+    var hasContent: Bool {
+        !tiles.isEmpty || !spawns.isEmpty || !platforms.isEmpty || !sentries.isEmpty || !enemies.isEmpty
+    }
+}
+
 final class MapEditorViewModel: ObservableObject {
     enum Tool: String, CaseIterable, Identifiable {
+        case select
         case pencil
         case flood
         case line
@@ -22,6 +76,7 @@ final class MapEditorViewModel: ObservableObject {
 
         var label: String {
             switch self {
+            case .select: return "Select"
             case .pencil: return "Pencil"
             case .flood: return "Flood Fill"
             case .line: return "Line"
@@ -38,6 +93,7 @@ final class MapEditorViewModel: ObservableObject {
 
         var systemImage: String {
             switch self {
+            case .select: return "cursorarrow.rays"
             case .pencil: return "pencil"
             case .flood: return "paintbrush.pointed.fill"
             case .line: return "line.diagonal"
@@ -123,27 +179,189 @@ final class MapEditorViewModel: ObservableObject {
         }
     }
 
-    @Published var blueprint: LevelBlueprint
+    enum Selection: Equatable {
+        case spawn(PlayerSpawnPoint.ID)
+        case platform(MovingPlatformBlueprint.ID)
+        case sentry(SentryBlueprint.ID)
+        case enemy(EnemyBlueprint.ID)
+        case none
+
+        var spawnID: PlayerSpawnPoint.ID? {
+            if case let .spawn(id) = self { return id }
+            return nil
+        }
+
+        var platformID: MovingPlatformBlueprint.ID? {
+            if case let .platform(id) = self { return id }
+            return nil
+        }
+
+        var sentryID: SentryBlueprint.ID? {
+            if case let .sentry(id) = self { return id }
+            return nil
+        }
+
+        var enemyID: EnemyBlueprint.ID? {
+            if case let .enemy(id) = self { return id }
+            return nil
+        }
+    }
+
+    struct SelectionMask: OptionSet {
+        let rawValue: Int
+
+        static let tiles = SelectionMask(rawValue: 1 << 0)
+        static let spawns = SelectionMask(rawValue: 1 << 1)
+        static let platforms = SelectionMask(rawValue: 1 << 2)
+        static let sentries = SelectionMask(rawValue: 1 << 3)
+        static let enemies = SelectionMask(rawValue: 1 << 4)
+
+        static let entities: SelectionMask = [.spawns, .platforms, .sentries, .enemies]
+        static let everything: SelectionMask = [.tiles, .entities]
+
+        var includesTiles: Bool { contains(.tiles) }
+        var includesEntities: Bool { !intersection(.entities).isEmpty }
+    }
+
+    struct MultiSelection: Equatable {
+        enum Source: Equatable {
+            case existing
+            case clipboard
+        }
+
+        var bounds: MapEditorSelectionBounds
+        var tiles: [GridPoint: LevelTileKind]
+        var spawns: [PlayerSpawnPoint]
+        var platforms: [MovingPlatformBlueprint]
+        var sentries: [SentryBlueprint]
+        var enemies: [EnemyBlueprint]
+        var mask: SelectionMask
+        var offset: MapEditorSelectionOffset = .zero
+        var source: Source = .existing
+
+        var isEmpty: Bool {
+            tiles.isEmpty && spawns.isEmpty && platforms.isEmpty && sentries.isEmpty && enemies.isEmpty
+        }
+
+        func contains(_ point: GridPoint) -> Bool {
+            bounds.offsetting(by: offset).contains(point)
+        }
+
+        func offsetting(by offset: MapEditorSelectionOffset) -> MultiSelection {
+            var copy = self
+            copy.offset = copy.offset.adding(row: offset.row, column: offset.column)
+            return copy
+        }
+    }
+
+    @Published var blueprint: LevelBlueprint {
+        didSet {
+            guard !isApplyingLoadedDocument else { return }
+            scheduleAutosave()
+        }
+    }
     @Published var showGrid: Bool = true
-    @Published var tool: Tool = .pencil
+    @Published var tool: Tool = .pencil {
+        didSet {
+            guard tool != oldValue else { return }
+            handleToolChanged(from: oldValue, to: tool)
+        }
+    }
     @Published var drawMode: ShapeDrawMode = .fill
-    @Published var levelName: String = "Untitled"
-    @Published var selectedSpawnID: PlayerSpawnPoint.ID?
-    @Published var selectedPlatformID: MovingPlatformBlueprint.ID?
-    @Published var selectedSentryID: SentryBlueprint.ID?
-    @Published var selectedEnemyID: EnemyBlueprint.ID?
+    @Published var levelName: String = "Untitled" {
+        didSet {
+            guard !isApplyingLoadedDocument else { return }
+            scheduleAutosave()
+        }
+    }
     @Published var hoveredPoint: GridPoint?
     @Published var shapePreview: Set<GridPoint> = []
     @Published var zoom: Double = 1.0
     @Published var selectedTileKind: LevelTileKind = .stone
+    @Published private(set) var selection: Selection = .none
+    @Published var selectionMask: SelectionMask = .everything {
+        didSet {
+            guard selectionMask != oldValue else { return }
+            if let selection = multiSelection {
+                let currentBounds = selection.bounds
+                let currentOffset = selection.offset
+                applySelection(bounds: currentBounds, mask: selectionMask)
+                if currentOffset != .zero {
+                    updateSelectionOffset(currentOffset)
+                }
+            }
+        }
+    }
+    @Published private(set) var multiSelection: MultiSelection?
+    @Published private(set) var selectionRenderState: MapEditorSelectionRenderState?
 
     private var lastPaintedPoint: GridPoint?
     private var dragStartPoint: GridPoint?
     private var undoStack: [LevelBlueprint] = []
     private var redoStack: [LevelBlueprint] = []
     private var platformDragContext: PlatformDragContext?
+    private var spawnDragID: PlayerSpawnPoint.ID?
     private var sentryDragID: SentryBlueprint.ID?
     private var enemyDragID: EnemyBlueprint.ID?
+    private var spawnDragCaptured = false
+    private var platformDragCaptured = false
+    private var sentryDragCaptured = false
+    private var enemyDragCaptured = false
+    private let persistence = MapPersistenceController.shared
+    private var autosaveWorkItem: DispatchWorkItem?
+    private var isApplyingLoadedDocument = false
+    private var selectionClipboard: MultiSelection?
+    private var selectionDragContext: SelectionDragContext?
+    private var toolBeforeDragOverride: Tool?
+
+    private enum SelectionDragContext {
+        case marquee(start: GridPoint)
+        case move(start: GridPoint, initialOffset: MapEditorSelectionOffset)
+    }
+
+    var selectedSpawnID: PlayerSpawnPoint.ID? {
+        get { selection.spawnID }
+        set {
+            if let id = newValue {
+                selection = .spawn(id)
+            } else if case .spawn = selection {
+                selection = .none
+            }
+        }
+    }
+
+    var selectedPlatformID: MovingPlatformBlueprint.ID? {
+        get { selection.platformID }
+        set {
+            if let id = newValue {
+                selection = .platform(id)
+            } else if case .platform = selection {
+                selection = .none
+            }
+        }
+    }
+
+    var selectedSentryID: SentryBlueprint.ID? {
+        get { selection.sentryID }
+        set {
+            if let id = newValue {
+                selection = .sentry(id)
+            } else if case .sentry = selection {
+                selection = .none
+            }
+        }
+    }
+
+    var selectedEnemyID: EnemyBlueprint.ID? {
+        get { selection.enemyID }
+        set {
+            if let id = newValue {
+                selection = .enemy(id)
+            } else if case .enemy = selection {
+                selection = .none
+            }
+        }
+    }
 
     private struct PlatformMoveContext {
         let platformID: MovingPlatformBlueprint.ID
@@ -158,16 +376,43 @@ final class MapEditorViewModel: ObservableObject {
         case move(PlatformMoveContext)
     }
 
-    init() {
-        var defaultBlueprint = LevelBlueprint(rows: 24, columns: 40, tileSize: 32)
-        let groundRow = defaultBlueprint.rows - 1
-        for column in 0..<defaultBlueprint.columns {
-            defaultBlueprint.setTile(.stone, at: GridPoint(row: groundRow, column: column))
+    private static func makeDefaultBlueprint() -> LevelBlueprint {
+        var blueprint = LevelBlueprint(rows: 24, columns: 40, tileSize: 32)
+        let groundRow = blueprint.rows - 1
+        for column in 0..<blueprint.columns {
+            blueprint.setTile(.stone, at: GridPoint(row: groundRow, column: column))
         }
-        let spawn = defaultBlueprint.addSpawnPoint(at: GridPoint(row: groundRow - 2, column: 2))
+        _ = blueprint.addSpawnPoint(at: GridPoint(row: groundRow - 2, column: 2))
+        return blueprint
+    }
+
+    init() {
+        let defaultBlueprint = MapEditorViewModel.makeDefaultBlueprint()
         self.blueprint = defaultBlueprint
-        self.selectedSpawnID = spawn?.id
         self.levelName = "Demo Level"
+        if let first = defaultBlueprint.spawnPoints.first?.id {
+            self.selection = .spawn(first)
+        } else {
+            self.selection = .none
+        }
+        var didLoadAutosave = false
+        if let document = persistence.loadAutosave() {
+            isApplyingLoadedDocument = true
+            blueprint = document.blueprint
+            if let name = document.metadata?.name.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                levelName = name
+            }
+            selection = .none
+            syncSelectionState()
+            isApplyingLoadedDocument = false
+            didLoadAutosave = true
+        }
+
+        if !didLoadAutosave {
+            scheduleAutosave()
+        }
+
+        syncSelectionState()
     }
 
     var canUndo: Bool { !undoStack.isEmpty }
@@ -199,6 +444,10 @@ final class MapEditorViewModel: ObservableObject {
         selectedTileKind == .empty ? .stone : selectedTileKind
     }
 
+    var hasSelection: Bool { multiSelection != nil }
+    var canCommitSelectionMove: Bool { hasPendingSelectionMove }
+    var canPasteSelection: Bool { selectionClipboard != nil }
+
     func toggleSelectedRampOrientation() {
         guard let flipped = selectedTileKind.flippedRamp else { return }
         selectedTileKind = flipped
@@ -210,6 +459,7 @@ final class MapEditorViewModel: ObservableObject {
 
     func zoomIn() { zoom = min(zoom + 0.2, 3.0) }
     func zoomOut() { zoom = max(zoom - 0.2, 0.4) }
+    func resetZoom() { zoom = 1.0 }
 
     func toggleGrid() { showGrid.toggle() }
 
@@ -219,11 +469,13 @@ final class MapEditorViewModel: ObservableObject {
         shapePreview.removeAll()
         lastPaintedPoint = nil
         dragStartPoint = nil
-        syncSelectedSpawn()
-        syncSelectedPlatform()
-        syncSelectedSentry()
-        syncSelectedEnemy()
+        syncSelectionState()
         platformDragContext = nil
+        spawnDragID = nil
+        spawnDragCaptured = false
+        platformDragCaptured = false
+        sentryDragCaptured = false
+        enemyDragCaptured = false
         sentryDragID = nil
         enemyDragID = nil
     }
@@ -236,11 +488,95 @@ final class MapEditorViewModel: ObservableObject {
         }
     }
 
+    func buildRampTestLayouts() {
+        captureSnapshot()
+
+        let baseRow = max(2, blueprint.rows - 2)
+        let startColumn = max(1, blueprint.columns / 4)
+        let width = min(14, blueprint.columns - startColumn)
+//        let height = 6
+
+//        for row in max(0, baseRow - height)...min(blueprint.rows - 1, baseRow + 1) {
+//            for column in startColumn..<min(blueprint.columns, startColumn + width) {
+//                blueprint.setTile(.empty, at: GridPoint(row: row, column: column))
+//            }
+//        }
+
+        let scenarios: [(offset: Int, includeExtra: Bool)] = [
+            (offset: 0, includeExtra: false),
+            (offset: 8, includeExtra: true),
+            (offset: 15, includeExtra: false)
+        ]
+
+        for scenario in scenarios {
+            let col0 = startColumn + scenario.offset
+            guard col0 + 2 < blueprint.columns else { continue }
+            placeUpRightRampPair(baseRow: baseRow, column: col0, includeExtraTile: scenario.includeExtra)
+        }
+
+        let mirrorColumn = startColumn + min(3, max(0, width - 4))
+        if mirrorColumn + 1 < blueprint.columns {
+            placeUpLeftRampPair(baseRow: baseRow, column: mirrorColumn, includeExtraTile: true)
+        }
+    }
+
+    private func placeUpRightRampPair(baseRow: Int, column: Int, includeExtraTile: Bool) {
+        let lower = GridPoint(row: baseRow, column: column)
+        let upper = GridPoint(row: max(0, baseRow - 1), column: column + 1)
+        let under = GridPoint(row: baseRow, column: column + 1)
+
+        blueprint.setTile(.rampUpRight, at: lower)
+        blueprint.setTile(.rampUpRight, at: upper)
+        blueprint.setTile(.stone, at: under)
+
+        if includeExtraTile {
+            let extra = GridPoint(row: baseRow, column: column + 2)
+            blueprint.setTile(.stone, at: extra)
+        }
+    }
+
+    private func placeUpLeftRampPair(baseRow: Int, column: Int, includeExtraTile: Bool) {
+        let lower = GridPoint(row: baseRow, column: min(blueprint.columns - 1, column + 1))
+        let upper = GridPoint(row: max(0, baseRow - 1), column: column)
+        let under = GridPoint(row: baseRow, column: column)
+
+        blueprint.setTile(.rampUpLeft, at: lower)
+        blueprint.setTile(.rampUpLeft, at: upper)
+        blueprint.setTile(.stone, at: under)
+
+        if includeExtraTile {
+            let extra = GridPoint(row: baseRow, column: max(0, column - 1))
+            blueprint.setTile(.stone, at: extra)
+        }
+    }
+
     func addSpawnAtCenter() {
         let point = GridPoint(row: max(0, blueprint.rows / 2), column: max(0, blueprint.columns / 2))
-        if let spawn = addSpawn(at: point) {
-            selectedSpawnID = spawn.id
+        if addSpawn(at: point) != nil {
             tool = .spawn
+        }
+    }
+
+    func addPlatformAtCenter() {
+        guard blueprint.rows > 0, blueprint.columns > 0 else { return }
+        let size = GridSize(rows: 1, columns: min(3, blueprint.columns))
+        let originRow = max(0, min(blueprint.rows - size.rows, blueprint.rows / 2))
+        let originColumn = max(0, min(blueprint.columns - size.columns, blueprint.columns / 2 - size.columns / 2))
+        let origin = GridPoint(row: originRow, column: originColumn)
+        let maxTargetColumn = blueprint.columns - size.columns
+        let desiredTargetColumn = min(maxTargetColumn, origin.column + max(2, size.columns + 1))
+        let target = GridPoint(row: origin.row, column: desiredTargetColumn)
+
+        captureSnapshot()
+        if insertPlatform(
+            origin: origin,
+            size: size,
+            target: target,
+            speed: 1.0
+        ) != nil {
+            tool = .platform
+        } else {
+            _ = undoStack.popLast()
         }
     }
 
@@ -250,7 +586,7 @@ final class MapEditorViewModel: ObservableObject {
     }
 
     func selectSpawn(_ spawn: PlayerSpawnPoint) {
-        selectedSpawnID = spawn.id
+        selection = .spawn(spawn.id)
         tool = .spawn
     }
 
@@ -262,7 +598,7 @@ final class MapEditorViewModel: ObservableObject {
     }
 
     func selectPlatform(_ platform: MovingPlatformBlueprint) {
-        selectedPlatformID = platform.id
+        selection = .platform(platform.id)
         tool = .platform
     }
 
@@ -274,7 +610,7 @@ final class MapEditorViewModel: ObservableObject {
     func removeSpawn(_ spawn: PlayerSpawnPoint) {
         captureSnapshot()
         blueprint.removeSpawn(spawn)
-        syncSelectedSpawn()
+        syncSelectionState()
     }
 
     func sentryColor(for index: Int) -> Color {
@@ -282,8 +618,21 @@ final class MapEditorViewModel: ObservableObject {
     }
 
     func selectSentry(_ sentry: SentryBlueprint) {
-        selectedSentryID = sentry.id
+        selection = .sentry(sentry.id)
         tool = .sentry
+    }
+
+    func addSentryAtCenter() {
+        let center = GridPoint(row: blueprint.rows / 2, column: blueprint.columns / 2)
+        let target = blueprint.contains(center) ? center : nil
+        let placement = target ?? findVacantSentryCoordinate(near: GridPoint(row: blueprint.rows / 2, column: blueprint.columns / 2))
+        guard let coordinate = placement else { return }
+        captureSnapshot()
+        if insertSentry(at: coordinate) != nil {
+            tool = .sentry
+        } else {
+            _ = undoStack.popLast()
+        }
     }
 
     func removeSelectedSentry() {
@@ -294,7 +643,7 @@ final class MapEditorViewModel: ObservableObject {
     func removeSentry(_ sentry: SentryBlueprint) {
         captureSnapshot()
         blueprint.removeSentry(id: sentry.id)
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func duplicateSelectedSentry() {
@@ -320,7 +669,7 @@ final class MapEditorViewModel: ObservableObject {
         captureSnapshot()
         if let created = blueprint.addSentry(duplicate) {
             selectedSentryID = created.id
-            syncSelectedSentry()
+            syncSelectionState()
         }
     }
 
@@ -332,7 +681,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.scanRange = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryCenter(_ degrees: Double) {
@@ -348,7 +697,7 @@ final class MapEditorViewModel: ObservableObject {
                 desired: ref.initialFacingDegrees
             )
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryArc(_ degrees: Double) {
@@ -364,7 +713,7 @@ final class MapEditorViewModel: ObservableObject {
                 desired: ref.initialFacingDegrees
             )
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryInitialAngle(_ degrees: Double) {
@@ -379,18 +728,18 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.initialFacingDegrees = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func selectEnemy(_ enemy: EnemyBlueprint) {
-        selectedEnemyID = enemy.id
+        selection = .enemy(enemy.id)
         tool = .enemy
     }
 
     func addEnemyAtCenter() {
         let point = GridPoint(row: blueprint.rows / 2, column: blueprint.columns / 2)
         if let created = insertEnemy(at: point) {
-            selectedEnemyID = created.id
+            selection = .enemy(created.id)
             tool = .enemy
         }
     }
@@ -403,7 +752,7 @@ final class MapEditorViewModel: ObservableObject {
     func removeEnemy(_ enemy: EnemyBlueprint) {
         captureSnapshot()
         blueprint.removeEnemy(id: enemy.id)
-        syncSelectedEnemy()
+        syncSelectionState()
     }
 
     func duplicateSelectedEnemy() {
@@ -415,7 +764,7 @@ final class MapEditorViewModel: ObservableObject {
         captureSnapshot()
         if let created = blueprint.addEnemy(duplicate) {
             selectedEnemyID = created.id
-            syncSelectedEnemy()
+            syncSelectionState()
         }
     }
 
@@ -847,7 +1196,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.sweepSpeedDegreesPerSecond = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryCooldown(_ cooldown: Double) {
@@ -858,7 +1207,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.fireCooldown = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryProjectileSpeed(_ speed: Double) {
@@ -869,7 +1218,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.projectileSpeed = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryProjectileSize(_ size: Double) {
@@ -880,7 +1229,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.projectileSize = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryProjectileLifetime(_ lifetime: Double) {
@@ -891,7 +1240,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.projectileLifetime = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryProjectileBurstCount(_ count: Int) {
@@ -902,7 +1251,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.projectileBurstCount = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryProjectileSpread(_ degrees: Double) {
@@ -913,7 +1262,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.projectileSpreadDegrees = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryHeatTurnRate(_ degreesPerSecond: Double) {
@@ -924,7 +1273,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.heatSeekingTurnRateDegreesPerSecond = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryProjectileKind(_ kind: SentryBlueprint.ProjectileKind) {
@@ -934,7 +1283,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.projectileKind = kind
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func updateSelectedSentryAimTolerance(_ degrees: Double) {
@@ -945,13 +1294,13 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateSentry(id: sentry.id) { ref in
             ref.aimToleranceDegrees = clamped
         }
-        syncSelectedSentry()
+        syncSelectionState()
     }
 
     func removePlatform(_ platform: MovingPlatformBlueprint) {
         captureSnapshot()
         blueprint.removeMovingPlatform(id: platform.id)
-        syncSelectedPlatform()
+        syncSelectionState()
     }
 
     func updateSelectedPlatformTarget(row: Int? = nil, column: Int? = nil) {
@@ -965,7 +1314,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateMovingPlatform(id: platform.id) { ref in
             ref.target = GridPoint(row: clampedRow, column: clampedCol)
         }
-        syncSelectedPlatform()
+        syncSelectionState()
     }
 
     func updateSelectedPlatformSpeed(_ speed: Double) {
@@ -976,7 +1325,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateMovingPlatform(id: platform.id) { ref in
             ref.speed = clamped
         }
-        syncSelectedPlatform()
+        syncSelectionState()
     }
 
     func updateSelectedPlatformInitialProgress(_ progress: Double) {
@@ -987,7 +1336,7 @@ final class MapEditorViewModel: ObservableObject {
         blueprint.updateMovingPlatform(id: platform.id) { ref in
             ref.initialProgress = clamped
         }
-        syncSelectedPlatform()
+        syncSelectionState()
     }
 
     func duplicateSelectedPlatform() {
@@ -1002,84 +1351,832 @@ final class MapEditorViewModel: ObservableObject {
             initialProgress: platform.initialProgress
         ) {
             selectedPlatformID = duplicate.id
-            syncSelectedPlatform()
+            syncSelectionState()
+        }
+    }
+
+    // MARK: - Selection Handling
+
+    private var hasPendingSelectionMove: Bool {
+        guard let selection = multiSelection else { return false }
+        switch selection.source {
+        case .existing:
+            return selection.offset != .zero
+        case .clipboard:
+            return true
+        }
+    }
+
+    private func handleSelectToolDragBegan(at point: GridPoint) {
+        if hasPendingSelectionMove, !(multiSelection?.contains(point) ?? false) {
+            commitPendingSelectionMoveIfNeeded()
+        }
+
+        dragStartPoint = point
+        lastPaintedPoint = nil
+
+        if let selection = multiSelection, selection.contains(point) {
+            selectionDragContext = .move(start: point, initialOffset: selection.offset)
+        } else {
+            selectionDragContext = .marquee(start: point)
+            shapePreview = pointsForRectangle(from: point, to: point, mode: .stroke)
+        }
+    }
+
+    private func handleSelectToolDragChanged(to point: GridPoint) {
+        guard let context = selectionDragContext else { return }
+
+        switch context {
+        case .move(let start, let initialOffset):
+            let delta = MapEditorSelectionOffset(
+                row: point.row - start.row,
+                column: point.column - start.column
+            )
+            let desired = initialOffset.adding(row: delta.row, column: delta.column)
+            updateSelectionOffset(desired)
+        case .marquee(let start):
+            shapePreview = pointsForRectangle(from: start, to: point, mode: .stroke)
+        }
+    }
+
+    private func handleSelectToolDragEnded(at point: GridPoint?) {
+        guard let context = selectionDragContext else {
+            shapePreview.removeAll()
+            dragStartPoint = nil
+            return
+        }
+
+        selectionDragContext = nil
+
+        switch context {
+        case .move:
+            break
+        case .marquee(let start):
+            let endPoint = point ?? start
+            let bounds = makeSelectionBounds(from: start, to: endPoint)
+            applySelection(bounds: bounds, mask: selectionMask)
+        }
+
+        shapePreview.removeAll()
+        dragStartPoint = nil
+        lastPaintedPoint = nil
+    }
+
+    private func makeSelectionBounds(from start: GridPoint, to end: GridPoint) -> MapEditorSelectionBounds {
+        MapEditorSelectionBounds(
+            minRow: min(start.row, end.row),
+            maxRow: max(start.row, end.row),
+            minColumn: min(start.column, end.column),
+            maxColumn: max(start.column, end.column)
+        )
+    }
+
+    private func applySelection(bounds: MapEditorSelectionBounds, mask: SelectionMask) {
+        guard let newSelection = buildSelection(in: bounds, mask: mask) else {
+            multiSelection = nil
+            refreshSelectionRenderState(using: nil)
+            self.selection = .none
+            return
+        }
+        multiSelection = newSelection
+        refreshSelectionRenderState(using: newSelection)
+        self.selection = .none
+    }
+
+    private func buildSelection(in bounds: MapEditorSelectionBounds, mask: SelectionMask) -> MultiSelection? {
+        guard bounds.isValid else { return nil }
+
+        var tiles: [GridPoint: LevelTileKind] = [:]
+        var spawns: [PlayerSpawnPoint] = []
+        var platforms: [MovingPlatformBlueprint] = []
+        var sentries: [SentryBlueprint] = []
+        var enemies: [EnemyBlueprint] = []
+
+        if mask.includesTiles {
+            for row in max(0, bounds.minRow)...min(blueprint.rows - 1, bounds.maxRow) {
+                for column in max(0, bounds.minColumn)...min(blueprint.columns - 1, bounds.maxColumn) {
+                    let point = GridPoint(row: row, column: column)
+                    let tile = blueprint.tile(at: point)
+                    if tile != .empty {
+                        tiles[point] = tile
+                    }
+                }
+            }
+        }
+
+        if mask.contains(.spawns) {
+            spawns = blueprint.spawnPoints.filter { bounds.contains($0.coordinate) }
+        }
+
+        if mask.contains(.platforms) {
+            for platform in blueprint.movingPlatforms {
+                if boundsIntersectsPlatform(bounds, platform: platform) {
+                    platforms.append(platform)
+                }
+            }
+        }
+
+        if mask.contains(.sentries) {
+            sentries = blueprint.sentries.filter { bounds.contains($0.coordinate) }
+        }
+
+        if mask.contains(.enemies) {
+            for enemy in blueprint.enemies {
+                if boundsIntersectsEnemy(bounds, enemy: enemy) {
+                    enemies.append(enemy)
+                }
+            }
+        }
+
+        var selection = MultiSelection(
+            bounds: clamp(bounds: bounds),
+            tiles: tiles,
+            spawns: spawns,
+            platforms: platforms,
+            sentries: sentries,
+            enemies: enemies,
+            mask: mask,
+            offset: .zero,
+            source: .existing
+        )
+
+        if selection.isEmpty {
+            return nil
+        }
+
+        selection.bounds = clamp(bounds: selection.bounds)
+        return selection
+    }
+
+    private func clamp(bounds: MapEditorSelectionBounds) -> MapEditorSelectionBounds {
+        MapEditorSelectionBounds(
+            minRow: max(0, min(bounds.minRow, blueprint.rows - 1)),
+            maxRow: max(0, min(bounds.maxRow, blueprint.rows - 1)),
+            minColumn: max(0, min(bounds.minColumn, blueprint.columns - 1)),
+            maxColumn: max(0, min(bounds.maxColumn, blueprint.columns - 1))
+        )
+    }
+
+    private func boundsIntersectsPlatform(_ bounds: MapEditorSelectionBounds, platform: MovingPlatformBlueprint) -> Bool {
+        let originBounds = MapEditorSelectionBounds(
+            minRow: platform.origin.row,
+            maxRow: platform.origin.row + platform.size.rows - 1,
+            minColumn: platform.origin.column,
+            maxColumn: platform.origin.column + platform.size.columns - 1
+        )
+
+        if boundsOverlap(bounds, originBounds) { return true }
+
+        let targetBounds = MapEditorSelectionBounds(
+            minRow: platform.target.row,
+            maxRow: platform.target.row + platform.size.rows - 1,
+            minColumn: platform.target.column,
+            maxColumn: platform.target.column + platform.size.columns - 1
+        )
+
+        return boundsOverlap(bounds, targetBounds)
+    }
+
+    private func boundsOverlap(_ lhs: MapEditorSelectionBounds, _ rhs: MapEditorSelectionBounds) -> Bool {
+        lhs.maxRow >= rhs.minRow && rhs.maxRow >= lhs.minRow && lhs.maxColumn >= rhs.minColumn && rhs.maxColumn >= lhs.minColumn
+    }
+
+    private func boundsIntersectsEnemy(_ bounds: MapEditorSelectionBounds, enemy: EnemyBlueprint) -> Bool {
+        let tileSize = max(1.0, blueprint.tileSize)
+        let centerColumn = Double(enemy.coordinate.column) + 0.5
+        let centerRow = Double(enemy.coordinate.row) + 0.5
+        let widthTiles = max(0.4, min(enemy.size.x / tileSize, 1.8))
+        let heightTiles = max(0.6, min(enemy.size.y / tileSize, 2.1))
+        let halfWidth = widthTiles * 0.5
+        let halfHeight = heightTiles * 0.5
+
+        let enemyMinColumn = centerColumn - halfWidth
+        let enemyMaxColumn = centerColumn + halfWidth
+        let enemyMinRow = centerRow - halfHeight
+        let enemyMaxRow = centerRow + halfHeight
+
+        let selectionMinColumn = Double(bounds.minColumn)
+        let selectionMaxColumn = Double(bounds.maxColumn + 1)
+        let selectionMinRow = Double(bounds.minRow)
+        let selectionMaxRow = Double(bounds.maxRow + 1)
+
+        let horizontalOverlap = selectionMaxColumn > enemyMinColumn && enemyMaxColumn > selectionMinColumn
+        let verticalOverlap = selectionMaxRow > enemyMinRow && enemyMaxRow > selectionMinRow
+
+        return horizontalOverlap && verticalOverlap
+    }
+
+    private func hitTestEnemy(at point: GridPoint) -> EnemyBlueprint? {
+        let tileSize = max(1.0, blueprint.tileSize)
+        let tileCenterColumn = Double(point.column) + 0.5
+        let tileCenterRow = Double(point.row) + 0.5
+
+        return blueprint.enemies.first { enemy in
+            let centerColumn = Double(enemy.coordinate.column) + 0.5
+            let centerRow = Double(enemy.coordinate.row) + 0.5
+            let widthTiles = max(0.4, min(enemy.size.x / tileSize, 1.8))
+            let heightTiles = max(0.6, min(enemy.size.y / tileSize, 2.1))
+            let halfWidth = widthTiles * 0.5
+            let halfHeight = heightTiles * 0.5
+
+            return abs(tileCenterColumn - centerColumn) <= halfWidth && abs(tileCenterRow - centerRow) <= halfHeight
+        }
+    }
+
+    private func updateSelectionOffset(_ desiredOffset: MapEditorSelectionOffset) {
+        guard var selection = multiSelection else { return }
+        let clamped = clamp(offset: desiredOffset, for: selection)
+        guard selection.offset != clamped else { return }
+        selection.offset = clamped
+        multiSelection = selection
+        refreshSelectionRenderState(using: selection)
+    }
+
+    private func clamp(offset: MapEditorSelectionOffset, for selection: MultiSelection) -> MapEditorSelectionOffset {
+        let minRowOffset = -selection.bounds.minRow
+        let maxRowOffset = max(0, blueprint.rows - 1 - selection.bounds.maxRow)
+        let minColumnOffset = -selection.bounds.minColumn
+        let maxColumnOffset = max(0, blueprint.columns - 1 - selection.bounds.maxColumn)
+
+        let clampedRow = min(max(offset.row, minRowOffset), maxRowOffset)
+        let clampedColumn = min(max(offset.column, minColumnOffset), maxColumnOffset)
+        return MapEditorSelectionOffset(row: clampedRow, column: clampedColumn)
+    }
+
+    private func refreshSelectionRenderState(using selection: MultiSelection?) {
+        guard let selection else {
+            selectionRenderState = nil
+            return
+        }
+
+        selectionRenderState = MapEditorSelectionRenderState(
+            bounds: selection.bounds,
+            offset: selection.offset,
+            tiles: selection.tiles,
+            spawns: selection.spawns,
+            platforms: selection.platforms,
+            sentries: selection.sentries,
+            enemies: selection.enemies,
+            mask: selection.mask,
+            source: selection.source
+        )
+    }
+
+    func commitSelectionMove() {
+        commitPendingSelectionMoveIfNeeded()
+    }
+
+    func cancelSelectionMove() {
+        guard var selection = multiSelection else { return }
+        switch selection.source {
+        case .existing:
+            guard selection.offset != .zero else { return }
+            selection.offset = .zero
+            multiSelection = selection
+            refreshSelectionRenderState(using: selection)
+        case .clipboard:
+            multiSelection = nil
+            refreshSelectionRenderState(using: nil)
+        }
+    }
+
+    func copySelection() {
+        guard multiSelection != nil else { return }
+        if multiSelection?.source == .existing, multiSelection?.offset != .zero {
+            commitPendingSelectionMoveIfNeeded()
+        }
+        guard let selection = multiSelection else { return }
+        selectionClipboard = makeClipboardSnapshot(from: selection)
+    }
+
+    func cutSelection() {
+        guard let selection = multiSelection else { return }
+
+        switch selection.source {
+        case .existing:
+            if selection.offset != .zero {
+                commitPendingSelectionMoveIfNeeded()
+            }
+            guard var current = multiSelection else { return }
+            selectionClipboard = makeClipboardSnapshot(from: current)
+            current.offset = .zero
+            removeSelectionContents(current)
+            multiSelection = nil
+            refreshSelectionRenderState(using: nil)
+        case .clipboard:
+            selectionClipboard = makeClipboardSnapshot(from: selection)
+            multiSelection = nil
+            refreshSelectionRenderState(using: nil)
+        }
+    }
+
+    func pasteSelection(at origin: GridPoint? = nil) {
+        guard let clipboard = selectionClipboard else { return }
+        let target = origin ?? hoveredPoint ?? GridPoint(row: clipboard.bounds.minRow, column: clipboard.bounds.minColumn)
+        let offset = MapEditorSelectionOffset(
+            row: target.row - clipboard.bounds.minRow,
+            column: target.column - clipboard.bounds.minColumn
+        )
+
+        var selection = clipboard
+        selection.offset = clamp(offset: offset, for: selection)
+        selection.source = .clipboard
+        commitPendingSelectionMoveIfNeeded()
+        applyPastedSelection(selection)
+    }
+
+    private func applyPastedSelection(_ selection: MultiSelection) {
+        multiSelection = selection
+        refreshSelectionRenderState(using: selection)
+    }
+
+    @discardableResult
+    private func applySelectionTiles(_ tiles: [GridPoint: LevelTileKind], offset: MapEditorSelectionOffset) -> [GridPoint: LevelTileKind] {
+        var inserted: [GridPoint: LevelTileKind] = [:]
+        for (point, kind) in tiles {
+            let destination = GridPoint(row: point.row + offset.row, column: point.column + offset.column)
+            guard blueprint.contains(destination) else { continue }
+            blueprint.setTile(kind, at: destination)
+            inserted[destination] = kind
+        }
+        return inserted
+    }
+
+    @discardableResult
+    private func applySelectionSpawns(_ spawns: [PlayerSpawnPoint], offset: MapEditorSelectionOffset) -> [PlayerSpawnPoint] {
+        var inserted: [PlayerSpawnPoint] = []
+        for spawn in spawns {
+            let coordinate = GridPoint(row: spawn.coordinate.row + offset.row, column: spawn.coordinate.column + offset.column)
+            guard blueprint.contains(coordinate) else { continue }
+            if let newSpawn = blueprint.addSpawnPoint(named: spawn.name, at: coordinate) {
+                inserted.append(newSpawn)
+            }
+        }
+        return inserted
+    }
+
+    @discardableResult
+    private func applySelectionPlatforms(_ platforms: [MovingPlatformBlueprint], offset: MapEditorSelectionOffset) -> [MovingPlatformBlueprint] {
+        var inserted: [MovingPlatformBlueprint] = []
+        for platform in platforms {
+            let origin = platform.origin.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            let target = platform.target.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            guard isValidPlatformPlacement(origin: origin, size: platform.size, target: target) else { continue }
+            if let newPlatform = blueprint.addMovingPlatform(
+                origin: origin,
+                size: platform.size,
+                target: target,
+                speed: platform.speed,
+                initialProgress: platform.initialProgress
+            ) {
+                inserted.append(newPlatform)
+            }
+        }
+        return inserted
+    }
+
+    @discardableResult
+    private func applySelectionSentries(_ sentries: [SentryBlueprint], offset: MapEditorSelectionOffset) -> [SentryBlueprint] {
+        var inserted: [SentryBlueprint] = []
+        for sentry in sentries {
+            let coordinate = sentry.coordinate.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            guard blueprint.contains(coordinate), blueprint.sentry(at: coordinate) == nil else { continue }
+            let newSentry = SentryBlueprint(
+                coordinate: coordinate,
+                scanRange: sentry.scanRange,
+                scanCenterDegrees: sentry.scanCenterDegrees,
+                scanArcDegrees: sentry.scanArcDegrees,
+                sweepSpeedDegreesPerSecond: sentry.sweepSpeedDegreesPerSecond,
+                fireCooldown: sentry.fireCooldown,
+                projectileSpeed: sentry.projectileSpeed,
+                projectileSize: sentry.projectileSize,
+                projectileLifetime: sentry.projectileLifetime,
+                projectileBurstCount: sentry.projectileBurstCount,
+                projectileSpreadDegrees: sentry.projectileSpreadDegrees,
+                aimToleranceDegrees: sentry.aimToleranceDegrees,
+                initialFacingDegrees: sentry.initialFacingDegrees,
+                projectileKind: sentry.projectileKind,
+                heatSeekingTurnRateDegreesPerSecond: sentry.heatSeekingTurnRateDegreesPerSecond
+            )
+            if let added = blueprint.addSentry(newSentry) {
+                inserted.append(added)
+            }
+        }
+        return inserted
+    }
+
+    @discardableResult
+    private func applySelectionEnemies(_ enemies: [EnemyBlueprint], offset: MapEditorSelectionOffset) -> [EnemyBlueprint] {
+        var inserted: [EnemyBlueprint] = []
+        for enemy in enemies {
+            let coordinate = enemy.coordinate.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+            guard blueprint.contains(coordinate), enemyFits(at: coordinate) else { continue }
+            var copy = enemy
+            copy.coordinate = coordinate
+            copy.id = UUID()
+            if let newEnemy = blueprint.addEnemy(copy) {
+                inserted.append(newEnemy)
+            }
+        }
+        return inserted
+    }
+
+    private func makeSelectionBounds(
+        tiles: Dictionary<GridPoint, LevelTileKind>.Keys,
+        spawns: [PlayerSpawnPoint],
+        platforms: [MovingPlatformBlueprint],
+        sentries: [SentryBlueprint],
+        enemies: [EnemyBlueprint]
+    ) -> MapEditorSelectionBounds? {
+        guard blueprint.rows > 0, blueprint.columns > 0 else { return nil }
+
+        var minRow = Int.max
+        var maxRow = Int.min
+        var minColumn = Int.max
+        var maxColumn = Int.min
+
+        func update(row: Int, column: Int) {
+            let clampedRow = min(max(row, 0), blueprint.rows - 1)
+            let clampedColumn = min(max(column, 0), blueprint.columns - 1)
+            minRow = min(minRow, clampedRow)
+            maxRow = max(maxRow, clampedRow)
+            minColumn = min(minColumn, clampedColumn)
+            maxColumn = max(maxColumn, clampedColumn)
+        }
+
+        for point in tiles {
+            update(row: point.row, column: point.column)
+        }
+
+        for spawn in spawns {
+            update(row: spawn.coordinate.row, column: spawn.coordinate.column)
+        }
+
+        for platform in platforms {
+            update(row: platform.origin.row, column: platform.origin.column)
+            update(
+                row: platform.origin.row + platform.size.rows - 1,
+                column: platform.origin.column + platform.size.columns - 1
+            )
+            update(row: platform.target.row, column: platform.target.column)
+            update(
+                row: platform.target.row + platform.size.rows - 1,
+                column: platform.target.column + platform.size.columns - 1
+            )
+        }
+
+        for sentry in sentries {
+            update(row: sentry.coordinate.row, column: sentry.coordinate.column)
+        }
+
+        for enemy in enemies {
+            update(row: enemy.coordinate.row, column: enemy.coordinate.column)
+        }
+
+        guard minRow != Int.max, minColumn != Int.max else { return nil }
+
+        return MapEditorSelectionBounds(
+            minRow: minRow,
+            maxRow: maxRow,
+            minColumn: minColumn,
+            maxColumn: maxColumn
+        )
+    }
+
+    private func makeClipboardSnapshot(from selection: MultiSelection) -> MultiSelection {
+        if selection.offset == .zero {
+            var copy = selection
+            copy.source = .clipboard
+            return copy
+        }
+
+        let offset = selection.offset
+        func transformed(_ point: GridPoint) -> GridPoint {
+            GridPoint(row: point.row + offset.row, column: point.column + offset.column)
+        }
+
+        var tiles: [GridPoint: LevelTileKind] = [:]
+        for (point, kind) in selection.tiles {
+            tiles[transformed(point)] = kind
+        }
+
+        let spawns = selection.spawns.map { spawn -> PlayerSpawnPoint in
+            var copy = spawn
+            copy.coordinate = transformed(spawn.coordinate)
+            return copy
+        }
+
+        let platforms = selection.platforms.map { platform -> MovingPlatformBlueprint in
+            var copy = platform
+            copy.origin = transformed(platform.origin)
+            copy.target = transformed(platform.target)
+            return copy
+        }
+
+        let sentries = selection.sentries.map { sentry -> SentryBlueprint in
+            var copy = sentry
+            copy.coordinate = transformed(sentry.coordinate)
+            return copy
+        }
+
+        let enemies = selection.enemies.map { enemy -> EnemyBlueprint in
+            var copy = enemy
+            copy.coordinate = transformed(enemy.coordinate)
+            return copy
+        }
+
+        let newBounds = clamp(bounds: selection.bounds.offsetting(by: offset))
+
+        return MultiSelection(
+            bounds: newBounds,
+            tiles: tiles,
+            spawns: spawns,
+            platforms: platforms,
+            sentries: sentries,
+            enemies: enemies,
+            mask: selection.mask,
+            offset: .zero,
+            source: .clipboard
+        )
+    }
+
+    private func enemyFits(at coordinate: GridPoint) -> Bool {
+        blueprint.contains(coordinate) && blueprint.enemy(at: coordinate) == nil
+    }
+
+    private func removeSelectionContents(_ selection: MultiSelection) {
+        captureSnapshot()
+
+        for (point, _) in selection.tiles {
+            blueprint.setTile(.empty, at: point)
+        }
+
+        for spawn in selection.spawns {
+            blueprint.removeSpawn(spawn)
+        }
+
+        for platform in selection.platforms {
+            blueprint.removeMovingPlatform(id: platform.id)
+        }
+
+        for sentry in selection.sentries {
+            blueprint.removeSentry(id: sentry.id)
+        }
+
+        for enemy in selection.enemies {
+            blueprint.removeEnemy(id: enemy.id)
+        }
+
+        syncSelectionState()
+    }
+
+    private func commitPendingSelectionMoveIfNeeded() {
+        guard var selection = multiSelection else { return }
+
+        switch selection.source {
+        case .existing:
+            guard selection.offset != .zero else { return }
+            let offset = selection.offset
+            captureSnapshot()
+
+            for (point, _) in selection.tiles {
+                blueprint.setTile(.empty, at: point)
+            }
+            _ = applySelectionTiles(selection.tiles, offset: offset)
+
+            for spawn in selection.spawns {
+                let destination = spawn.coordinate.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+                blueprint.updateSpawn(id: spawn.id, to: destination)
+            }
+
+            for platform in selection.platforms {
+                let origin = platform.origin.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+                let target = platform.target.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+                blueprint.updateMovingPlatform(id: platform.id) { ref in
+                    ref.origin = origin
+                    ref.target = target
+                }
+            }
+
+            for sentry in selection.sentries {
+                let destination = sentry.coordinate.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+                blueprint.updateSentry(id: sentry.id) { ref in
+                    ref.coordinate = destination
+                }
+            }
+
+            for enemy in selection.enemies {
+                let destination = enemy.coordinate.offsetting(rowDelta: offset.row, columnDelta: offset.column)
+                blueprint.updateEnemy(id: enemy.id) { ref in
+                    ref.coordinate = destination
+                }
+            }
+
+            selection.bounds = selection.bounds.offsetting(by: offset)
+            selection.offset = .zero
+            multiSelection = selection
+            refreshSelectionRenderState(using: selection)
+            syncSelectionState()
+
+        case .clipboard:
+            let offset = selection.offset
+            captureSnapshot()
+
+            let insertedTiles = applySelectionTiles(selection.tiles, offset: offset)
+            let insertedSpawns = applySelectionSpawns(selection.spawns, offset: offset)
+            let insertedPlatforms = applySelectionPlatforms(selection.platforms, offset: offset)
+            let insertedSentries = applySelectionSentries(selection.sentries, offset: offset)
+            let insertedEnemies = applySelectionEnemies(selection.enemies, offset: offset)
+
+            if let bounds = makeSelectionBounds(
+                tiles: insertedTiles.keys,
+                spawns: insertedSpawns,
+                platforms: insertedPlatforms,
+                sentries: insertedSentries,
+                enemies: insertedEnemies
+            ) {
+                let committed = MultiSelection(
+                    bounds: bounds,
+                    tiles: insertedTiles,
+                    spawns: insertedSpawns,
+                    platforms: insertedPlatforms,
+                    sentries: insertedSentries,
+                    enemies: insertedEnemies,
+                    mask: selection.mask,
+                    offset: .zero,
+                    source: .existing
+                )
+                multiSelection = committed
+                refreshSelectionRenderState(using: committed)
+            } else {
+                multiSelection = nil
+                refreshSelectionRenderState(using: nil)
+            }
+
+            syncSelectionState()
+        }
+    }
+
+    func setSelectionMask(_ mask: SelectionMask) {
+        guard selectionMask != mask else { return }
+        selectionMask = mask
+
+        guard var current = multiSelection else { return }
+        current.mask = mask
+
+        switch current.source {
+        case .existing:
+            if current.offset != .zero {
+                commitPendingSelectionMoveIfNeeded()
+                guard let updated = multiSelection else { return }
+                applySelection(bounds: updated.bounds, mask: mask)
+                return
+            }
+            applySelection(bounds: current.bounds, mask: mask)
+        case .clipboard:
+            multiSelection = current
+            refreshSelectionRenderState(using: current)
+        }
+    }
+
+    private func handleToolChanged(from oldValue: Tool, to newValue: Tool) {
+        if oldValue == .select, newValue != .select {
+            commitPendingSelectionMoveIfNeeded()
+            selectionDragContext = nil
+            shapePreview.removeAll()
+            multiSelection = nil
+            refreshSelectionRenderState(using: nil)
+        }
+    }
+
+    // MARK: - Interaction Handling
+
+    private func applyToolOverrideIfNeeded(for activeTool: Tool) {
+        guard tool != activeTool else { return }
+        if toolBeforeDragOverride == nil {
+            toolBeforeDragOverride = tool
+        }
+        tool = activeTool
+    }
+
+    private func resetToolOverrideIfNeeded() {
+        if let previous = toolBeforeDragOverride {
+            toolBeforeDragOverride = nil
+            tool = previous
         }
     }
 
     func handleDragBegan(at point: GridPoint) {
         guard blueprint.contains(point) else { return }
-        captureSnapshot()
+
+        hoveredPoint = point
+
+        if tool == .select {
+            handleSelectToolDragBegan(at: point)
+            return
+        }
+
+        commitPendingSelectionMoveIfNeeded()
+
+        spawnDragCaptured = false
+        platformDragCaptured = false
+        sentryDragCaptured = false
+        enemyDragCaptured = false
+
+        spawnDragID = nil
+        sentryDragID = nil
+        enemyDragID = nil
+
+        var detectedTool: Tool?
+
+        if let spawn = blueprint.spawn(at: point) {
+            selection = .spawn(spawn.id)
+            spawnDragID = spawn.id
+            detectedTool = .spawn
+        }
+
+        if detectedTool == nil, let platform = platform(at: point) {
+            selection = .platform(platform.id)
+            platformDragContext = .move(
+                PlatformMoveContext(
+                    platformID: platform.id,
+                    size: platform.size,
+                    startOrigin: platform.origin,
+                    startTarget: platform.target,
+                    startPoint: point
+                )
+            )
+            detectedTool = .platform
+        } else {
+            platformDragContext = tool == .platform ? .create : nil
+        }
+
+        if detectedTool == nil, let sentry = sentry(at: point) {
+            selection = .sentry(sentry.id)
+            sentryDragID = sentry.id
+            detectedTool = .sentry
+        }
+
+        if detectedTool == nil, let enemy = hitTestEnemy(at: point) {
+            selection = .enemy(enemy.id)
+            enemyDragID = enemy.id
+            detectedTool = .enemy
+        }
+
+        let activeTool = detectedTool ?? tool
+
         dragStartPoint = point
         lastPaintedPoint = nil
 
-        if tool == .platform {
-            if let platform = platform(at: point) {
-                selectedPlatformID = platform.id
-                platformDragContext = .move(
-                    PlatformMoveContext(
-                        platformID: platform.id,
-                        size: platform.size,
-                        startOrigin: platform.origin,
-                        startTarget: platform.target,
-                        startPoint: point
-                    )
-                )
-                shapePreview = pointsForRectangle(
-                    from: platform.origin,
-                    to: GridPoint(row: platform.origin.row + platform.size.rows - 1, column: platform.origin.column + platform.size.columns - 1),
-                    mode: .stroke
-                )
-            } else {
+        if activeTool != .select {
+            applyToolOverrideIfNeeded(for: activeTool)
+        }
+
+        switch activeTool {
+        case .pencil, .flood, .line, .rectangle, .rectErase, .circle, .eraser:
+            captureSnapshot()
+            applyDrag(at: point, isInitial: true)
+        case .spawn:
+            applyDrag(at: point, isInitial: true)
+        case .platform:
+            if platformDragContext == nil {
                 platformDragContext = .create
             }
-        } else {
-            platformDragContext = nil
+            applyDrag(at: point, isInitial: true)
+        case .sentry, .enemy:
+            applyDrag(at: point, isInitial: true)
+        case .select:
+            break
         }
-
-        if tool == .sentry {
-            if let existing = sentry(at: point) {
-                selectedSentryID = existing.id
-                sentryDragID = existing.id
-            } else if let newSentry = insertSentry(at: point) {
-                selectedSentryID = newSentry.id
-                sentryDragID = newSentry.id
-            }
-        } else {
-            sentryDragID = nil
-        }
-
-        if tool == .enemy {
-            if let existing = enemy(at: point) {
-                selectedEnemyID = existing.id
-                enemyDragID = existing.id
-            } else if let newEnemy = insertEnemy(at: point) {
-                selectedEnemyID = newEnemy.id
-                enemyDragID = newEnemy.id
-            }
-        } else {
-            enemyDragID = nil
-        }
-
-        applyDrag(at: point, isInitial: true)
     }
 
     func handleDragChanged(to point: GridPoint) {
         guard blueprint.contains(point) else { return }
-        applyDrag(at: point, isInitial: false)
+        hoveredPoint = point
+        if tool == .select {
+            handleSelectToolDragChanged(to: point)
+        } else {
+            applyDrag(at: point, isInitial: false)
+        }
     }
 
     func handleDragEnded(at point: GridPoint?) {
+        if tool == .select {
+            handleSelectToolDragEnded(at: point)
+            hoveredPoint = nil
+            return
+        }
+
         defer {
             lastPaintedPoint = nil
             dragStartPoint = nil
             shapePreview.removeAll()
             hoveredPoint = nil
-            syncSelectedSpawn()
-            syncSelectedPlatform()
-            syncSelectedSentry()
-            syncSelectedEnemy()
+            syncSelectionState()
+            spawnDragID = nil
             sentryDragID = nil
             enemyDragID = nil
+            resetToolOverrideIfNeeded()
         }
 
         guard let point else { return }
@@ -1117,10 +2214,7 @@ final class MapEditorViewModel: ObservableObject {
             guard let previous = model.undoStack.popLast() else { return }
             model.redoStack.append(model.blueprint)
             model.blueprint = previous
-            model.syncSelectedSpawn()
-            model.syncSelectedPlatform()
-            model.syncSelectedSentry()
-            model.syncSelectedEnemy()
+            model.syncSelectionState()
         }
     }
 
@@ -1129,10 +2223,7 @@ final class MapEditorViewModel: ObservableObject {
             guard let next = model.redoStack.popLast() else { return }
             model.undoStack.append(model.blueprint)
             model.blueprint = next
-            model.syncSelectedSpawn()
-            model.syncSelectedPlatform()
-            model.syncSelectedSentry()
-            model.syncSelectedEnemy()
+            model.syncSelectionState()
         }
     }
 
@@ -1172,14 +2263,27 @@ final class MapEditorViewModel: ObservableObject {
         case .platform:
             switch platformDragContext {
             case .move(let context):
-                movePlatform(context: context, to: point)
-            default:
+                if isInitial {
+                    let origin = context.startOrigin
+                    shapePreview = pointsForRectangle(
+                        from: origin,
+                        to: GridPoint(row: origin.row + context.size.rows - 1, column: origin.column + context.size.columns - 1),
+                        mode: .stroke
+                    )
+                } else {
+                    movePlatform(context: context, to: point)
+                }
+            case .create:
                 shapePreview = pointsForRectangle(from: dragStartPoint ?? point, to: point, mode: .fill)
+            case .none:
+                break
             }
         case .sentry:
             moveSentry(to: point, isInitial: isInitial)
         case .enemy:
             moveEnemy(to: point, isInitial: isInitial)
+        case .select:
+            break
         }
     }
 
@@ -1228,10 +2332,16 @@ final class MapEditorViewModel: ObservableObject {
     }
 
     private func moveSpawn(to point: GridPoint, isInitial: Bool) {
-        if let id = selectedSpawnID, blueprint.spawnPoint(id: id) != nil {
-            blueprint.updateSpawn(id: id, to: point)
-        } else if isInitial, let newSpawn = insertSpawn(at: point) {
-            selectedSpawnID = newSpawn.id
+        guard blueprint.contains(point) else { return }
+        if isInitial {
+            if let existing = blueprint.spawn(at: point) {
+                selection = .spawn(existing.id)
+                _ = undoStack.popLast()
+            } else {
+                _ = insertSpawn(at: point)
+            }
+        } else if let spawn = selectedSpawn {
+            blueprint.updateSpawn(id: spawn.id, to: point)
         }
     }
 
@@ -1242,7 +2352,11 @@ final class MapEditorViewModel: ObservableObject {
                 ref.coordinate = point
             }
         } else if isInitial {
-            if let newSentry = insertSentry(at: point) {
+            if let existing = sentry(at: point) {
+                selectedSentryID = existing.id
+                sentryDragID = existing.id
+                _ = undoStack.popLast()
+            } else if let newSentry = insertSentry(at: point) {
                 selectedSentryID = newSentry.id
                 sentryDragID = newSentry.id
             }
@@ -1256,7 +2370,11 @@ final class MapEditorViewModel: ObservableObject {
                 ref.coordinate = point
             }
         } else if isInitial {
-            if let newEnemy = insertEnemy(at: point) {
+            if let existing = enemy(at: point) {
+                selectedEnemyID = existing.id
+                enemyDragID = existing.id
+                _ = undoStack.popLast()
+            } else if let newEnemy = insertEnemy(at: point) {
                 selectedEnemyID = newEnemy.id
                 enemyDragID = newEnemy.id
             }
@@ -1432,40 +2550,64 @@ final class MapEditorViewModel: ObservableObject {
             undoStack.removeFirst()
         }
         redoStack.removeAll()
+        scheduleAutosave()
     }
 
-    private func syncSelectedSpawn() {
-        if let id = selectedSpawnID, blueprint.spawnPoint(id: id) != nil {
-            return
+    private func syncSelectionState() {
+        switch selection {
+        case .spawn(let id):
+            if blueprint.spawnPoint(id: id) != nil { return }
+            if let first = blueprint.spawnPoints.first?.id {
+                selection = .spawn(first)
+            } else {
+                selectFallbackEntity()
+            }
+        case .platform(let id):
+            if blueprint.movingPlatform(id: id) != nil { return }
+            if let first = blueprint.movingPlatforms.first?.id {
+                selection = .platform(first)
+            } else {
+                selectFallbackEntity()
+            }
+        case .sentry(let id):
+            if blueprint.sentry(id: id) != nil { return }
+            if let first = blueprint.sentries.first?.id {
+                selection = .sentry(first)
+            } else {
+                selectFallbackEntity()
+            }
+        case .enemy(let id):
+            if blueprint.enemy(id: id) != nil { return }
+            if let first = blueprint.enemies.first?.id {
+                selection = .enemy(first)
+            } else {
+                selectFallbackEntity()
+            }
+        case .none:
+            selectFallbackEntity()
         }
-        selectedSpawnID = blueprint.spawnPoints.first?.id
     }
 
-    private func syncSelectedPlatform() {
-        if let id = selectedPlatformID, blueprint.movingPlatform(id: id) != nil {
-            return
+    private func selectFallbackEntity() {
+        if let spawn = blueprint.spawnPoints.first?.id {
+            selection = .spawn(spawn)
+        } else if let platform = blueprint.movingPlatforms.first?.id {
+            selection = .platform(platform)
+        } else if let sentry = blueprint.sentries.first?.id {
+            selection = .sentry(sentry)
+        } else if let enemy = blueprint.enemies.first?.id {
+            selection = .enemy(enemy)
+        } else {
+            selection = .none
         }
-        selectedPlatformID = blueprint.movingPlatforms.first?.id
-    }
-
-    private func syncSelectedSentry() {
-        if let id = selectedSentryID, blueprint.sentry(id: id) != nil {
-            return
-        }
-        selectedSentryID = blueprint.sentries.first?.id
-    }
-
-    private func syncSelectedEnemy() {
-        if let id = selectedEnemyID, blueprint.enemy(id: id) != nil {
-            return
-        }
-        selectedEnemyID = blueprint.enemies.first?.id
     }
 
     @discardableResult
     private func insertSpawn(at point: GridPoint) -> PlayerSpawnPoint? {
-        let spawn = blueprint.addSpawnPoint(at: point)
-        syncSelectedSpawn()
+        guard let spawn = blueprint.addSpawnPoint(at: point) else {
+            return nil
+        }
+        selection = .spawn(spawn.id)
         return spawn
     }
 
@@ -1474,21 +2616,21 @@ final class MapEditorViewModel: ObservableObject {
         guard let platform = blueprint.addMovingPlatform(origin: origin, size: size, target: target, speed: speed) else {
             return nil
         }
-        syncSelectedPlatform()
+        selection = .platform(platform.id)
         return platform
     }
 
     @discardableResult
     private func insertSentry(at point: GridPoint) -> SentryBlueprint? {
         guard let sentry = blueprint.addSentry(at: point) else { return nil }
-        syncSelectedSentry()
+        selection = .sentry(sentry.id)
         return sentry
     }
 
     @discardableResult
     private func insertEnemy(at point: GridPoint) -> EnemyBlueprint? {
         guard let enemy = blueprint.addEnemy(at: point) else { return nil }
-        syncSelectedEnemy()
+        selection = .enemy(enemy.id)
         return enemy
     }
 
@@ -1496,7 +2638,7 @@ final class MapEditorViewModel: ObservableObject {
         guard let enemy = selectedEnemy else { return }
         captureSnapshot()
         blueprint.updateEnemy(id: enemy.id, mutate: mutate)
-        syncSelectedEnemy()
+        syncSelectionState()
     }
 
     func platformTargetRowRange(_ platform: MovingPlatformBlueprint) -> ClosedRange<Int> {
@@ -1604,6 +2746,93 @@ final class MapEditorViewModel: ObservableObject {
         return min(max(desired, range.lowerBound), range.upperBound)
     }
 
+    // MARK: - Persistence
+
+    func makeMapDocument() -> MapDocument {
+        MapDocument(
+            blueprint: blueprint,
+            metadata: MapDocumentMetadata(name: levelName)
+        )
+    }
+
+    func exportJSON(prettyPrinted: Bool = true) throws -> Data {
+        try makeMapDocument().encodedData(prettyPrinted: prettyPrinted)
+    }
+
+    func importJSON(_ data: Data) throws {
+        let document = try MapDocument.decode(from: data)
+        applyLoadedDocument(document)
+    }
+
+    func applyLoadedDocument(_ document: MapDocument) {
+        isApplyingLoadedDocument = true
+        undoStack.removeAll()
+        redoStack.removeAll()
+        lastPaintedPoint = nil
+        dragStartPoint = nil
+        platformDragContext = nil
+        sentryDragID = nil
+        enemyDragID = nil
+        shapePreview.removeAll()
+        blueprint = document.blueprint
+        if let name = document.metadata?.name.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            levelName = name
+        }
+        zoom = 1.0
+        selectedTileKind = .stone
+        selection = .none
+        syncSelectionState()
+        isApplyingLoadedDocument = false
+        scheduleAutosave()
+    }
+
+    func makeExportFilename() -> String {
+        let trimmed = levelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmed.isEmpty ? "Map" : trimmed
+        let invalidCharacters = CharacterSet(charactersIn: "\\/:*?\"<>|#%&{}$!@`^=+\u{00A0}")
+        let components = base.components(separatedBy: invalidCharacters)
+        let sanitized = components.joined(separator: " ").replacingOccurrences(of: "  ", with: " ")
+        let trimmedResult = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedResult.isEmpty ? "Map" : trimmedResult
+    }
+
+    func updateLevelRows(_ rows: Int) {
+        let clamped = max(4, min(rows, 256))
+        guard clamped != blueprint.rows else { return }
+        captureSnapshot()
+        blueprint.resize(rows: clamped, columns: blueprint.columns)
+        syncSelectionState()
+        scheduleAutosave()
+    }
+
+    func updateLevelColumns(_ columns: Int) {
+        let clamped = max(4, min(columns, 256))
+        guard clamped != blueprint.columns else { return }
+        captureSnapshot()
+        blueprint.resize(rows: blueprint.rows, columns: clamped)
+        syncSelectionState()
+        scheduleAutosave()
+    }
+
+    func updateTileSize(_ size: Double) {
+        let clamped = max(8.0, min(size, 128.0))
+        guard abs(blueprint.tileSize - clamped) > 0.001 else { return }
+        captureSnapshot()
+        blueprint.updateTileSize(clamped)
+        scheduleAutosave()
+    }
+
+    private func scheduleAutosave() {
+        autosaveWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let document = self.makeMapDocument()
+            persistence.saveAutosave(document: document)
+        }
+        autosaveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+    }
+
     private func scheduleMutation(_ mutation: @escaping (MapEditorViewModel) -> Void) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1611,4 +2840,3 @@ final class MapEditorViewModel: ObservableObject {
         }
     }
 }
-

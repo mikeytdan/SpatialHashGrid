@@ -10,11 +10,41 @@ struct MapEditorView: View {
     @State private var spawnNameDraft: String = ""
     @State private var input = InputController()
     @State private var editorFocused = true
+    @State private var showingTileBlockEditor = false
+    @State private var isShowingExporter = false
+    @State private var isShowingImporter = false
+    @State private var pendingExportDocument = MapFileDocument.placeholder()
+    @State private var pendingExportFilename: String = "Map"
+    @State private var persistenceErrorMessage: String?
+    @State private var sidebarWidth: CGFloat = 320
+    @State private var inspectorWidth: CGFloat = 360
+    @State private var inspectorTab: InspectorTab = .context
+    @State private var showInspector: Bool = true
+    @State private var sidebarDragInitial: CGFloat?
+    @State private var inspectorDragInitial: CGFloat?
+    @State private var tilePaletteHeight: CGFloat = 260
+    @State private var tilePaletteDragStart: CGFloat?
 
     private let adapter = MetalLevelPreviewAdapter()
 
+    private let minSidebarWidth: CGFloat = 260
+    private let minInspectorWidth: CGFloat = 280
+    private let minCanvasWidth: CGFloat = 520
+    private let dividerHitArea: CGFloat = 10
+    private let minTilePaletteHeight: CGFloat = 180
+    private let maxTilePaletteFraction: CGFloat = 0.65
+    private let tileDividerThickness: CGFloat = 6
+
+    private enum InspectorTab: String, CaseIterable, Identifiable {
+        case context = "Context"
+        case entities = "Entities"
+        case level = "Level"
+
+        var id: String { rawValue }
+    }
+
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
             if isPreviewing {
                 adapter.makePreview(for: viewModel.blueprint, input: input) {
                     isPreviewing = false
@@ -22,37 +52,12 @@ struct MapEditorView: View {
                 }
                 .ignoresSafeArea()
             } else {
-                HStack(alignment: .top, spacing: 16) {
-                    ScrollView(.vertical, showsIndicators: true) {
-                        controls
-                            .padding(.vertical, 16)
-                            .padding(.horizontal, 12)
-                            .frame(maxWidth: .infinity, alignment: .top)
-                    }
-                    .frame(minWidth: 300, maxHeight: .infinity)
-                    .background(.thinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    
-                    mapStage
-                        .frame(minWidth: 520, minHeight: 520)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(PlatformColors.secondaryBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .padding()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                
-                floatingControls
-                    .padding(20)
+                editorWorkspace
             }
         }
-//        .sheet(isPresented: $isPreviewing) {
-//            adapter.makePreview(for: viewModel.blueprint, input: input) {
-//                isPreviewing = false
-//                focusEditor()
-//            }
-//            .ignoresSafeArea()
-//        }
+        .sheet(isPresented: $showingTileBlockEditor) {
+            NavigationStack { TileBlockEditorView() }
+        }
         .onChange(of: viewModel.selectedSpawnID) {
             spawnNameDraft = viewModel.selectedSpawn?.name ?? ""
         }
@@ -71,102 +76,844 @@ struct MapEditorView: View {
                 }
             }
         }
+        .fileExporter(
+            isPresented: $isShowingExporter,
+            document: pendingExportDocument,
+            contentType: MapFileDocument.contentType,
+            defaultFilename: pendingExportFilename
+        ) { result in
+            if case let .failure(error) = result {
+                persistenceErrorMessage = error.localizedDescription
+            }
+        }
+        .fileImporter(
+            isPresented: $isShowingImporter,
+            allowedContentTypes: MapFileDocument.readableContentTypes,
+            allowsMultipleSelection: false
+        ) { result in
+            handleImportResult(result)
+        }
+        .alert(
+            "File Operation Failed",
+            isPresented: Binding(
+                get: { persistenceErrorMessage != nil },
+                set: { newValue in
+                    if !newValue { persistenceErrorMessage = nil }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) { persistenceErrorMessage = nil }
+        } message: {
+            if let message = persistenceErrorMessage {
+                Text(message)
+            }
+        }
         .keyboardInput(focused: $editorFocused, onEvent: handleKeyboardEvent)
     }
 
-    private var mapStage: some View {
-        MapCanvasView(
-            blueprint: viewModel.blueprint,
-            previewTiles: viewModel.shapePreview,
-            showGrid: viewModel.showGrid,
-            zoom: viewModel.zoom,
-            selectedSpawnID: viewModel.selectedSpawnID,
-            selectedPlatformID: viewModel.selectedPlatformID,
-            selectedSentryID: viewModel.selectedSentryID,
-            selectedEnemyID: viewModel.selectedEnemyID,
-            previewColor: viewModel.paintTileKind.fillColor,
-            hoveredPoint: viewModel.hoveredPoint,
-            onHover: viewModel.updateHover,
-            onDragBegan: viewModel.handleDragBegan,
-            onDragChanged: viewModel.handleDragChanged,
-            onDragEnded: viewModel.handleDragEnded,
-            onFocusRequested: focusEditorIfNeeded
-        )
+    private var editorWorkspace: some View {
+        VStack(spacing: 0) {
+            workspaceToolbar
+            Divider()
+            GeometryReader { geometry in
+                let totalWidth = geometry.size.width
+                let canShowInspector = showInspector && totalWidth > (minSidebarWidth + minCanvasWidth + minInspectorWidth + 40)
+                let sidebarLimit = max(minSidebarWidth, totalWidth - minCanvasWidth - (canShowInspector ? minInspectorWidth : 0))
+                let currentSidebarWidth = min(max(sidebarWidth, minSidebarWidth), sidebarLimit)
+                let inspectorLimit = canShowInspector ? max(minInspectorWidth, totalWidth - minCanvasWidth - currentSidebarWidth) : 0
+                let currentInspectorWidth = canShowInspector ? min(max(inspectorWidth, minInspectorWidth), inspectorLimit) : 0
+
+                HStack(spacing: 0) {
+                    sidebarPanel
+                        .frame(width: currentSidebarWidth)
+                        .background(PlatformColors.secondaryBackground)
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 1)
+                        .contentShape(Rectangle().inset(by: -dividerHitArea))
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    if sidebarDragInitial == nil {
+                                        sidebarDragInitial = sidebarWidth
+                                    }
+                                    let initialWidth = sidebarDragInitial ?? sidebarWidth
+                                    let proposed = initialWidth + value.translation.width
+                                    let upperBound = max(minSidebarWidth, totalWidth - minCanvasWidth - (canShowInspector ? minInspectorWidth : 0))
+                                    sidebarWidth = min(max(proposed, minSidebarWidth), upperBound)
+                                }
+                                .onEnded { _ in
+                                    sidebarDragInitial = nil
+                                }
+                        )
+
+                    mapStage
+                        .frame(minWidth: minCanvasWidth, maxWidth: .infinity, maxHeight: .infinity)
+                        .background(PlatformColors.secondaryBackground)
+
+                    if canShowInspector {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.08))
+                            .frame(width: 1)
+                            .contentShape(Rectangle().inset(by: -dividerHitArea))
+                            .gesture(
+                                DragGesture(minimumDistance: 0)
+                                    .onChanged { value in
+                                        if inspectorDragInitial == nil {
+                                            inspectorDragInitial = inspectorWidth
+                                        }
+                                        let initialWidth = inspectorDragInitial ?? inspectorWidth
+                                        let proposed = initialWidth - value.translation.width
+                                        let upperBound = max(minInspectorWidth, totalWidth - minCanvasWidth - min(sidebarWidth, sidebarLimit))
+                                        inspectorWidth = min(max(proposed, minInspectorWidth), upperBound)
+                                    }
+                                    .onEnded { _ in
+                                        inspectorDragInitial = nil
+                                    }
+                            )
+
+                        inspectorPanel
+                            .frame(width: currentInspectorWidth)
+                            .background(PlatformColors.secondaryBackground)
+                    }
+                }
+                .frame(width: totalWidth, height: geometry.size.height)
+                .background(PlatformColors.workspaceBackground)
+            }
+        }
+        .background(PlatformColors.workspaceBackground.ignoresSafeArea())
+        .animation(.easeInOut(duration: 0.2), value: showInspector)
     }
 
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            levelNameSection
-            tilePaletteSection
-            toolsSection
-            drawModeSection
-            canvasControls
-            enemySection
-            sentrySection
-            platformSection
-            spawnSection
-            quickActions
-            Spacer(minLength: 24)
+    private var workspaceToolbar: some View {
+        HStack(spacing: 12) {
+            Label("Map Editor", systemImage: "square.grid.2x2")
+                .font(.title3.bold())
+
+            Divider()
+                .frame(height: 24)
+
+            Label(viewModel.tool.label, systemImage: viewModel.tool.systemImage)
+                .font(.subheadline)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.accentColor.opacity(0.12))
+                .clipShape(Capsule())
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                Button(action: viewModel.undo) {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .disabled(!viewModel.canUndo)
+
+                Button(action: viewModel.redo) {
+                    Image(systemName: "arrow.uturn.forward")
+                }
+                .disabled(!viewModel.canRedo)
+            }
+            .buttonStyle(.borderless)
+
+            Divider()
+                .frame(height: 24)
+
+            Menu {
+                Button("Export Map…", action: beginExport)
+                Button("Import Map…") { isShowingImporter = true }
+                Divider()
+                Button("Tile Block Editor") { showingTileBlockEditor = true }
+            } label: {
+                Label("File", systemImage: "tray.and.arrow.down")
+            }
+            .accessibilityLabel("File Actions")
+
+            Button(action: viewModel.zoomOut) {
+                Image(systemName: "minus.magnifyingglass")
+            }
+            .accessibilityLabel("Zoom Out")
+
+            Button(action: viewModel.zoomIn) {
+                Image(systemName: "plus.magnifyingglass")
+            }
+            .accessibilityLabel("Zoom In")
+
+            Button(action: viewModel.resetZoom) {
+                Image(systemName: "arrow.counterclockwise")
+            }
+            .accessibilityLabel("Reset Zoom")
+
+            Divider()
+                .frame(height: 24)
+
+            Button(action: viewModel.toggleGrid) {
+                Image(systemName: viewModel.showGrid ? "square.grid.3x3.fill" : "square.grid.3x3")
+                    .foregroundStyle(viewModel.showGrid ? Color.accentColor : Color.primary)
+            }
+            .accessibilityLabel(viewModel.showGrid ? "Hide Grid" : "Show Grid")
+
+            Button(action: openPreviewIfPossible) {
+                Image(systemName: "play.circle")
+            }
+            .disabled(viewModel.blueprint.spawnPoints.isEmpty)
+            .accessibilityLabel("Playtest Level")
+
+            Button(action: { withAnimation { showInspector.toggle() } }) {
+                Image(systemName: "sidebar.right")
+                    .symbolVariant(showInspector ? .none : .slash)
+            }
+            .accessibilityLabel(showInspector ? "Hide Inspector" : "Show Inspector")
+        }
+        .buttonStyle(.plain)
+        .labelStyle(.iconOnly)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+
+    private var mapStage: some View {
+        let tilePixels = CGFloat(viewModel.blueprint.tileSize) * CGFloat(viewModel.zoom)
+        let mapWidth = tilePixels * CGFloat(viewModel.blueprint.columns)
+        let mapHeight = tilePixels * CGFloat(viewModel.blueprint.rows)
+        let frameWidth = max(mapWidth, minCanvasWidth)
+        let frameHeight = max(mapHeight, minCanvasWidth)
+
+        return ScrollView([.horizontal, .vertical]) {
+            MapCanvasView(
+                blueprint: viewModel.blueprint,
+                previewTiles: viewModel.shapePreview,
+                showGrid: viewModel.showGrid,
+                zoom: viewModel.zoom,
+                selectedSpawnID: viewModel.selectedSpawnID,
+                selectedPlatformID: viewModel.selectedPlatformID,
+                selectedSentryID: viewModel.selectedSentryID,
+                selectedEnemyID: viewModel.selectedEnemyID,
+                previewColor: viewModel.paintTileKind.fillColor,
+                hoveredPoint: viewModel.hoveredPoint,
+                selectionState: viewModel.selectionRenderState,
+                onHover: viewModel.updateHover,
+                onDragBegan: viewModel.handleDragBegan,
+                onDragChanged: viewModel.handleDragChanged,
+                onDragEnded: viewModel.handleDragEnded,
+                onFocusRequested: focusEditorIfNeeded
+            )
+            .frame(width: frameWidth, height: frameHeight)
+            .padding(40)
+        }
+        .scrollIndicators(.hidden)
+        .background(PlatformColors.secondaryBackground)
+    }
+
+    private var sidebarPanel: some View {
+        GeometryReader { geometry in
+            let bottomInset = geometry.safeAreaInsets.bottom
+            let minPalette = minTilePaletteHeight
+            let maxPalette = max(minPalette, (geometry.size.height - bottomInset) * maxTilePaletteFraction)
+            let paletteHeight = min(max(tilePaletteHeight, minPalette), maxPalette)
+            VStack(spacing: 0) {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        levelHeader
+                        toolGrid
+                        panelCard { toolOptionsSection }
+                    }
+                    .padding(.vertical, 18)
+                    .padding(.horizontal, 14)
+                }
+                .frame(height: max(0, geometry.size.height - paletteHeight - tileDividerThickness - bottomInset))
+
+                dividerHandle(minPalette: minPalette, maxPalette: maxPalette)
+
+                tilePaletteDock
+                    .frame(height: paletteHeight)
+                    .background(.ultraThinMaterial)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+            .padding(.bottom, bottomInset)
+            .onAppear {
+                tilePaletteHeight = min(max(tilePaletteHeight, minPalette), maxPalette)
+            }
+            .onChange(of: geometry.size.height) {
+                tilePaletteHeight = min(max(tilePaletteHeight, minPalette), maxPalette)
+            }
+        }
+    }
+
+    private var inspectorPanel: some View {
+        VStack(spacing: 0) {
+            Picker("Inspector", selection: $inspectorTab) {
+                ForEach(InspectorTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 16) {
+                    switch inspectorTab {
+                    case .context:
+                        contextInspector
+                    case .entities:
+                        entitiesInspector
+                    case .level:
+                        levelInspector
+                    }
+                }
+                .padding(16)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var contextInspector: some View {
+        if let enemy = viewModel.selectedEnemy {
+            panelCard { enemyDetailPanel(enemy: enemy) }
+        } else if let platform = viewModel.selectedPlatform {
+            panelCard { platformDetailPanel(platform: platform) }
+        } else if let sentry = viewModel.selectedSentry {
+            panelCard { sentryDetailPanel(sentry: sentry) }
+        } else if let spawn = viewModel.selectedSpawn {
+            panelCard { spawnDetailPanel(spawn: spawn) }
+        } else {
+            panelCard { selectionPlaceholder }
+        }
+    }
+
+    @ViewBuilder
+    private var entitiesInspector: some View {
+        panelCard { spawnSection }
+        panelCard { platformSection }
+        panelCard { sentrySection }
+        panelCard { enemySection }
+    }
+
+    @ViewBuilder
+    private var levelInspector: some View {
+        panelCard { levelOverviewSection }
+        panelCard { quickActions }
+    }
+
+    private func panelCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var levelHeader: some View {
+        panelCard { levelNameSection }
+    }
+
+    private var toolGrid: some View {
+        panelCard { toolsSection }
+    }
+
+    private var tilePaletteDock: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Tiles")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ScrollView(.vertical, showsIndicators: true) {
+                tilePaletteSection
+            }
+            .frame(maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .opacity(isTileEditingTool ? 1 : 0.35)
+            .allowsHitTesting(isTileEditingTool)
+            .overlay(alignment: .center) {
+                if !isTileEditingTool {
+                    emptyHint("Select a tile tool to edit the palette.")
+                        .multilineTextAlignment(.center)
+                        .padding(12)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+            }
+
+            Button(action: { showingTileBlockEditor = true }) {
+                Label("Tile Block Editor", systemImage: "rectangle.grid.2x2")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(16)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func platformDetailPanel(platform: MovingPlatformBlueprint) -> some View {
+        let current = viewModel.selectedPlatform ?? platform
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Selected Platform")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Text("Origin r\(current.origin.row) c\(current.origin.column) • Size \(current.size.columns)×\(current.size.rows)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            let rowBinding = Binding<Int>(
+                get: { viewModel.selectedPlatform?.target.row ?? current.target.row },
+                set: { viewModel.updateSelectedPlatformTarget(row: $0) }
+            )
+            let columnBinding = Binding<Int>(
+                get: { viewModel.selectedPlatform?.target.column ?? current.target.column },
+                set: { viewModel.updateSelectedPlatformTarget(column: $0) }
+            )
+
+            Stepper(value: rowBinding, in: viewModel.platformTargetRowRange(current)) {
+                Text("Target Row: \(rowBinding.wrappedValue)")
+            }
+
+            Stepper(value: columnBinding, in: viewModel.platformTargetColumnRange(current)) {
+                Text("Target Column: \(columnBinding.wrappedValue)")
+            }
+
+            let speedBinding = Binding<Double>(
+                get: { viewModel.selectedPlatform?.speed ?? current.speed },
+                set: { viewModel.updateSelectedPlatformSpeed($0) }
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Slider(value: speedBinding, in: 0.1...5.0, step: 0.05)
+                Text(String(format: "Speed: %.2f tiles/s", speedBinding.wrappedValue))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            let progressBinding = Binding<Double>(
+                get: { viewModel.selectedPlatform?.initialProgress ?? current.initialProgress },
+                set: { viewModel.updateSelectedPlatformInitialProgress($0) }
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Slider(value: progressBinding, in: 0...1, step: 0.01)
+                Text(String(format: "Start Position: %.0f%%", progressBinding.wrappedValue * 100))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Button {
+                    viewModel.duplicateSelectedPlatform()
+                } label: {
+                    Label("Duplicate", systemImage: "plus.square.on.square")
+                }
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    viewModel.removePlatform(current)
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private func sentryDetailPanel(sentry: SentryBlueprint) -> some View {
+        let current = viewModel.selectedSentry ?? sentry
+        let angleRange = viewModel.sentryInitialAngleRange(current)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Selected Sentry")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Text("Coordinate r\(current.coordinate.row) c\(current.coordinate.column)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Group {
+                let rangeBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.scanRange ?? current.scanRange },
+                    set: { viewModel.updateSelectedSentryRange($0) }
+                )
+                SliderRow(title: "Scan Range", value: rangeBinding, range: 1.0...32.0, step: 0.5, formatter: { String(format: "%.1f tiles", $0) })
+
+                let centerBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.scanCenterDegrees ?? current.scanCenterDegrees },
+                    set: { viewModel.updateSelectedSentryCenter($0) }
+                )
+                SliderRow(title: "Scan Center", value: centerBinding, range: -180.0...180.0, step: 1.0, formatter: { String(format: "%.0f°", $0) })
+
+                let arcBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.scanArcDegrees ?? current.scanArcDegrees },
+                    set: { viewModel.updateSelectedSentryArc($0) }
+                )
+                SliderRow(title: "Sweep Arc", value: arcBinding, range: 10.0...240.0, step: 1.0, formatter: { String(format: "%.0f°", $0) })
+
+                let initialBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.initialFacingDegrees ?? current.initialFacingDegrees },
+                    set: { viewModel.updateSelectedSentryInitialAngle($0) }
+                )
+                SliderRow(title: "Initial Angle", value: initialBinding, range: angleRange.lowerBound...angleRange.upperBound, step: 1.0, formatter: { String(format: "%.0f°", $0) })
+
+                let sweepBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.sweepSpeedDegreesPerSecond ?? current.sweepSpeedDegreesPerSecond },
+                    set: { viewModel.updateSelectedSentrySweepSpeed($0) }
+                )
+                SliderRow(title: "Sweep Speed", value: sweepBinding, range: 10.0...360.0, step: 5.0, formatter: { String(format: "%.0f°/s", $0) })
+            }
+
+            let projectileKindBinding = Binding<SentryBlueprint.ProjectileKind>(
+                get: { viewModel.selectedSentry?.projectileKind ?? current.projectileKind },
+                set: { viewModel.updateSelectedSentryProjectileKind($0) }
+            )
+
+            Picker("Projectile", selection: projectileKindBinding) {
+                ForEach(SentryBlueprint.ProjectileKind.allCases, id: \.self) { kind in
+                    Text(kind.displayLabel).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            let activeKind = viewModel.selectedSentry?.projectileKind ?? current.projectileKind
+
+            Group {
+                let speedBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.projectileSpeed ?? current.projectileSpeed },
+                    set: { viewModel.updateSelectedSentryProjectileSpeed($0) }
+                )
+                SliderRow(
+                    title: activeKind == .laser ? "Beam Intensity" : "Projectile Speed",
+                    value: speedBinding,
+                    range: 50.0...2000.0,
+                    step: 25.0,
+                    formatter: { String(format: "%.0f", $0) }
+                )
+                .disabled(activeKind == .laser)
+
+                let sizeBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.projectileSize ?? current.projectileSize },
+                    set: { viewModel.updateSelectedSentryProjectileSize($0) }
+                )
+                SliderRow(title: "Projectile Size", value: sizeBinding, range: 0.05...2.0, step: 0.05, formatter: { String(format: "%.2f tiles", $0) })
+
+                let lifetimeBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.projectileLifetime ?? current.projectileLifetime },
+                    set: { viewModel.updateSelectedSentryProjectileLifetime($0) }
+                )
+                SliderRow(title: activeKind == .laser ? "Beam Duration" : "Lifetime", value: lifetimeBinding, range: 0.1...12.0, step: 0.1, formatter: { String(format: "%.1fs", $0) })
+
+                let burstBinding = Binding<Int>(
+                    get: { viewModel.selectedSentry?.projectileBurstCount ?? current.projectileBurstCount },
+                    set: { viewModel.updateSelectedSentryProjectileBurstCount($0) }
+                )
+                Stepper(value: burstBinding, in: 1...12) {
+                    Text("Burst Count: \(burstBinding.wrappedValue)")
+                }
+
+                let spreadBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.projectileSpreadDegrees ?? current.projectileSpreadDegrees },
+                    set: { viewModel.updateSelectedSentryProjectileSpread($0) }
+                )
+                SliderRow(title: "Spread", value: spreadBinding, range: 0.0...90.0, step: 1.0, formatter: { String(format: "%.0f°", $0) })
+                    .disabled(burstBinding.wrappedValue <= 1)
+
+                if activeKind == .heatSeeking {
+                    let turnBinding = Binding<Double>(
+                        get: { viewModel.selectedSentry?.heatSeekingTurnRateDegreesPerSecond ?? current.heatSeekingTurnRateDegreesPerSecond },
+                        set: { viewModel.updateSelectedSentryHeatTurnRate($0) }
+                    )
+                    SliderRow(title: "Turn Rate", value: turnBinding, range: 30.0...720.0, step: 10.0, formatter: { String(format: "%.0f°/s", $0) })
+                }
+
+                let cooldownBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.fireCooldown ?? current.fireCooldown },
+                    set: { viewModel.updateSelectedSentryCooldown($0) }
+                )
+                Stepper(value: cooldownBinding, in: 0.2...5.0, step: 0.1) {
+                    Text(String(format: "Cooldown: %.1fs", cooldownBinding.wrappedValue))
+                }
+
+                let toleranceBinding = Binding<Double>(
+                    get: { viewModel.selectedSentry?.aimToleranceDegrees ?? current.aimToleranceDegrees },
+                    set: { viewModel.updateSelectedSentryAimTolerance($0) }
+                )
+                Stepper(value: toleranceBinding, in: 2...45, step: 1) {
+                    Text(String(format: "Aim Tolerance: %.0f°", toleranceBinding.wrappedValue))
+                }
+            }
+
+            HStack {
+                Button {
+                    viewModel.duplicateSelectedSentry()
+                } label: {
+                    Label("Duplicate", systemImage: "plus.square.on.square")
+                }
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    viewModel.removeSentry(current)
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private func spawnDetailPanel(spawn: PlayerSpawnPoint) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Selected Spawn")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Text("Coordinate r\(spawn.coordinate.row) c\(spawn.coordinate.column)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            TextField("Name", text: $spawnNameDraft)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { viewModel.renameSelectedSpawn(to: spawnNameDraft) }
+
+            HStack {
+                Button(action: { viewModel.renameSelectedSpawn(to: spawnNameDraft) }) {
+                    Label("Save Name", systemImage: "checkmark.circle")
+                }
+
+                Spacer()
+
+                Button(role: .destructive, action: viewModel.removeSelectedSpawn) {
+                    Label("Remove", systemImage: "trash")
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private var selectionPlaceholder: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("No Selection")
+                .font(.headline)
+            Text("Choose a tool or select an item in the canvas to edit its properties here.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var levelOverviewSection: some View {
+        let blueprint = viewModel.blueprint
+        let tileCount = blueprint.tileEntries().count
+        let solidCount = blueprint.solidTiles().count
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Level Overview")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow {
+                    overviewKey("Size")
+                    Text("\(blueprint.columns) × \(blueprint.rows)")
+                }
+                GridRow {
+                    overviewKey("Tile Size")
+                    Text(String(format: "%.0f px", blueprint.tileSize))
+                }
+                GridRow {
+                    overviewKey("Tiles")
+                    Text("\(tileCount) total • \(solidCount) solid")
+                }
+                GridRow {
+                    overviewKey("Spawns")
+                    Text("\(blueprint.spawnPoints.count)")
+                }
+                GridRow {
+                    overviewKey("Platforms")
+                    Text("\(blueprint.movingPlatforms.count)")
+                }
+                GridRow {
+                    overviewKey("Sentries")
+                    Text("\(blueprint.sentries.count)")
+                }
+                GridRow {
+                    overviewKey("Enemies")
+                    Text("\(blueprint.enemies.count)")
+                }
+            }
+            .font(.footnote)
+
+            Divider()
+                .padding(.vertical, 6)
+
+            let rowsBinding = Binding<Int>(
+                get: { viewModel.blueprint.rows },
+                set: { viewModel.updateLevelRows($0) }
+            )
+
+            let columnsBinding = Binding<Int>(
+                get: { viewModel.blueprint.columns },
+                set: { viewModel.updateLevelColumns($0) }
+            )
+
+            Stepper(value: rowsBinding, in: 4...256) {
+                Text("Rows: \(rowsBinding.wrappedValue)")
+            }
+
+            Stepper(value: columnsBinding, in: 4...256) {
+                Text("Columns: \(columnsBinding.wrappedValue)")
+            }
+
+            let tileSizeBinding = Binding<Double>(
+                get: { viewModel.blueprint.tileSize },
+                set: { viewModel.updateTileSize($0) }
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Slider(value: tileSizeBinding, in: 8...128, step: 1)
+                Text(String(format: "Tile Size: %.0f px", tileSizeBinding.wrappedValue))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func SliderRow(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double,
+        formatter: (Double) -> String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Slider(value: value, in: range, step: step)
+            Text("\(title): \(formatter(value.wrappedValue))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func overviewKey(_ label: String) -> some View {
+        Text(label)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+    }
+
+    private func dividerHandle(minPalette: CGFloat, maxPalette: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(height: tileDividerThickness)
+            .overlay(
+                Capsule()
+                    .fill(Color.primary.opacity(0.12))
+                    .frame(width: 40, height: 3)
+            )
+            .contentShape(Rectangle().inset(by: -dividerHitArea))
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if tilePaletteDragStart == nil {
+                            tilePaletteDragStart = min(max(tilePaletteHeight, minPalette), maxPalette)
+                        }
+                        let initial = tilePaletteDragStart ?? tilePaletteHeight
+                        let proposed = initial - value.translation.height
+                        tilePaletteHeight = min(max(proposed, minPalette), maxPalette)
+                    }
+                    .onEnded { _ in
+                        tilePaletteDragStart = nil
+                    }
+            )
+    }
+
+    private func header(title: String, addAction: @escaping () -> Void) -> some View {
+        HStack {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button(action: addAction) {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Add \(title)")
+        }
+    }
+
+    private func entityRow(title: String, subtitle: String, color: Color, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 10, height: 10)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? color.opacity(0.18) : PlatformColors.secondaryBackground)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private func emptyHint(_ message: String) -> some View {
+        Text(message)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+    }
+
+    private var isTileEditingTool: Bool {
+        switch viewModel.tool {
+        case .pencil, .flood, .line, .rectangle, .circle, .eraser, .rectErase:
+            return true
+        default:
+            return false
         }
     }
 
     private var enemySection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Enemies")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    viewModel.tool = .enemy
-                } label: {
-                    Label("Enemy Tool", systemImage: "figure.walk")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    viewModel.addEnemyAtCenter()
-                } label: {
-                    Label("Add Enemy", systemImage: "plus")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.bordered)
-            }
+        VStack(alignment: .leading, spacing: 10) {
+            header(title: "Enemies") { viewModel.addEnemyAtCenter() }
 
             let enemies = viewModel.blueprint.enemies
             if enemies.isEmpty {
-                Text("Use the Enemy tool to place configurable AI actors with patrols, chase/flee logic, and melee or ranged attacks.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                emptyHint("Drop enemies onto the map to populate encounters.")
             } else {
-                let columns = Array(repeating: GridItem(.flexible(minimum: 32, maximum: 50), spacing: 6), count: 4)
-                LazyVGrid(columns: columns, spacing: 6) {
+                VStack(spacing: 6) {
                     ForEach(Array(enemies.enumerated()), id: \.element.id) { index, enemy in
-                        Button {
+                        entityRow(
+                            title: "Enemy \(index + 1)",
+                            subtitle: "r\(enemy.coordinate.row) c\(enemy.coordinate.column)",
+                            color: viewModel.enemyColor(for: index),
+                            isSelected: viewModel.selectedEnemyID == enemy.id
+                        ) {
                             viewModel.selectEnemy(enemy)
-                        } label: {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(viewModel.enemyColor(for: index).opacity(0.75))
-                                .frame(width: 44, height: 44)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .stroke(viewModel.selectedEnemyID == enemy.id ? Color.white : Color.clear, lineWidth: 2)
-                                )
-                                .overlay(
-                                    Text("\(index + 1)")
-                                        .font(.caption2.bold())
-                                        .foregroundStyle(.white)
-                                )
                         }
-                        .buttonStyle(.plain)
                         .accessibilityLabel("Enemy #\(index + 1)")
                     }
                 }
-            }
-
-            if let enemy = viewModel.selectedEnemy {
-                enemyDetailPanel(enemy: enemy)
             }
         }
     }
@@ -621,15 +1368,24 @@ struct MapEditorView: View {
                 .foregroundStyle(.secondary)
             TextField("Name", text: $viewModel.levelName)
                 .textFieldStyle(.roundedBorder)
+            HStack(spacing: 8) {
+                Button(action: beginExport) {
+                    Label("Export JSON", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    isShowingImporter = true
+                } label: {
+                    Label("Import JSON", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 
     private var tilePaletteSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Tiles")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             let columns = [GridItem(.adaptive(minimum: 52, maximum: 80), spacing: 8)]
             LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
                 ForEach(viewModel.tilePalette, id: \.self) { tile in
@@ -648,18 +1404,13 @@ struct MapEditorView: View {
                 .foregroundStyle(.secondary)
 
             if viewModel.selectedTileKind.isRamp {
-                HStack(spacing: 8) {
-                    Button {
-                        viewModel.toggleSelectedRampOrientation()
-                    } label: {
-                        Label("Flip Ramp", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .buttonStyle(.bordered)
-
-                    Text("Ramp tiles paint with the shown slope; flip to match your layout.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                Button {
+                    viewModel.toggleSelectedRampOrientation()
+                } label: {
+                    Label("Flip Ramp", systemImage: "arrow.triangle.2.circlepath")
+                        .labelStyle(.titleAndIcon)
                 }
+                .buttonStyle(.bordered)
             }
         }
     }
@@ -693,270 +1444,178 @@ struct MapEditorView: View {
         }
     }
 
-    private var drawModeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Shape Mode")
+    private var shapeModePicker: some View {
+        Picker("Draw Mode", selection: $viewModel.drawMode) {
+            ForEach(MapEditorViewModel.ShapeDrawMode.allCases) { mode in
+                Text(mode.label).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    @ViewBuilder
+    private var toolOptionsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Tool Options")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Picker("Draw Mode", selection: $viewModel.drawMode) {
-                ForEach(MapEditorViewModel.ShapeDrawMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
+
+            switch viewModel.tool {
+            case .select:
+                selectionToolOptions
+            case .pencil:
+                Text("Click or drag to paint tiles. Hold Option while clicking to sample from the canvas.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .flood:
+                Text("Flood fill replaces contiguous regions using the selected tile. Double-click to flood the entire layer.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .line, .rectangle, .circle:
+                shapeModePicker
+                Text("Hold Shift to constrain angles and Option to erase instead of fill.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .rectErase:
+                Text("Drag to erase a rectangular area. Hold Option to invert the selection.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .eraser:
+                Text("Drag to clear tiles. Hold Option while dragging to toggle solids instead of wiping.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .spawn:
+                Button(action: addSpawn) {
+                    Label("Add Spawn At Center", systemImage: "plus.circle")
                 }
+                .buttonStyle(.bordered)
+                Text("Use the Spawn tool to drag existing spawns to new tiles.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .platform:
+                Button(action: viewModel.addPlatformAtCenter) {
+                    Label("Add Platform Near Center", systemImage: "rectangle.on.rectangle")
+                }
+                .buttonStyle(.bordered)
+                Text("Drag in the canvas to define a platform. Adjust its path and speed from the inspector.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .sentry:
+                Button(action: viewModel.addSentryAtCenter) {
+                    Label("Add Sentry Near Center", systemImage: "dot.radiowaves.right")
+                }
+                .buttonStyle(.bordered)
+                Text("Place a sentry on a solid tile. Use the inspector to tune sweep angles, projectiles, and targeting.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .enemy:
+                Button(action: viewModel.addEnemyAtCenter) {
+                    Label("Drop Enemy Near Center", systemImage: "figure.walk")
+                }
+                .buttonStyle(.bordered)
+                Text("Enemies inherit movement, behavior, and attack presets that you can refine in the inspector.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-            .pickerStyle(.segmented)
         }
     }
 
-    private var canvasControls: some View {
+    private var selectionToolOptions: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Canvas")
+            Text("Selection Mask")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                Button(action: viewModel.zoomOut) { Image(systemName: "minus.magnifyingglass") }
-                Button(action: viewModel.zoomIn) { Image(systemName: "plus.magnifyingglass") }
+                Button("All") { viewModel.setSelectionMask(.everything) }
+                Button("Tiles") { viewModel.setSelectionMask([.tiles]) }
+                Button("Entities") { viewModel.setSelectionMask(.entities) }
             }
             .buttonStyle(.bordered)
-            .labelStyle(.iconOnly)
 
-            HStack(spacing: 8) {
-                Button(action: viewModel.undo) {
-                    Label("Undo", systemImage: "arrow.uturn.backward")
-                }
-                .disabled(!viewModel.canUndo)
+            VStack(alignment: .leading, spacing: 6) {
+                maskToggle(label: "Tiles", flag: .tiles)
+                maskToggle(label: "Spawns", flag: .spawns)
+                maskToggle(label: "Platforms", flag: .platforms)
+                maskToggle(label: "Sentries", flag: .sentries)
+                maskToggle(label: "Enemies", flag: .enemies)
+            }
 
-                Button(action: viewModel.redo) {
-                    Label("Redo", systemImage: "arrow.uturn.forward")
+            Divider()
+
+            if let selection = viewModel.multiSelection {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Tiles: \(selection.tiles.count)  Spawns: \(selection.spawns.count)  Platforms: \(selection.platforms.count)  Sentries: \(selection.sentries.count)  Enemies: \(selection.enemies.count)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    if selection.offset != .zero {
+                        Text("Pending offset r\(selection.offset.row) c\(selection.offset.column)")
+                            .font(.caption2)
+                            .foregroundStyle(Color.accentColor)
+                    }
                 }
-                .disabled(!viewModel.canRedo)
+            } else {
+                Text("Drag to select tiles and entities. Use the mask to control what gets captured.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                Button("Copy") { viewModel.copySelection() }
+                    .disabled(!viewModel.hasSelection)
+                Button("Cut") { viewModel.cutSelection() }
+                    .disabled(!viewModel.hasSelection)
+                Button("Paste") { viewModel.pasteSelection() }
+                    .disabled(!viewModel.canPasteSelection)
+            }
+            .buttonStyle(.bordered)
+
+            HStack(spacing: 10) {
+                Button("Commit Move") { viewModel.commitSelectionMove() }
+                    .disabled(!viewModel.canCommitSelectionMove)
+                Button("Cancel Move") { viewModel.cancelSelectionMove() }
+                    .disabled(!viewModel.canCommitSelectionMove)
             }
             .buttonStyle(.bordered)
         }
+    }
+
+    private func maskToggle(label: String, flag: MapEditorViewModel.SelectionMask) -> some View {
+        Toggle(label, isOn: Binding(
+            get: { viewModel.selectionMask.contains(flag) },
+            set: { newValue in
+                var mask = viewModel.selectionMask
+                if newValue {
+                    mask.insert(flag)
+                } else {
+                    mask.remove(flag)
+                }
+                viewModel.setSelectionMask(mask)
+            }
+        ))
+        .toggleStyle(.switch)
     }
 
     private var sentrySection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Sentries")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    viewModel.tool = .sentry
-                } label: {
-                    Label("Sentry Tool", systemImage: "dot.radiowaves.right")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.bordered)
-            }
+        VStack(alignment: .leading, spacing: 10) {
+            header(title: "Sentries") { viewModel.addSentryAtCenter() }
 
             let sentries = viewModel.blueprint.sentries
             if sentries.isEmpty {
-                Text("Use the Sentry tool to place automated turrets that sweep for players.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                emptyHint("Place sentries on solid tiles to create defensive coverage.")
             } else {
-                let columns = Array(repeating: GridItem(.flexible(minimum: 32, maximum: 50), spacing: 8), count: 4)
-                LazyVGrid(columns: columns, spacing: 8) {
+                VStack(spacing: 6) {
                     ForEach(Array(sentries.enumerated()), id: \.element.id) { index, sentry in
-                        Button {
+                        entityRow(
+                            title: "Sentry \(index + 1)",
+                            subtitle: "r\(sentry.coordinate.row) c\(sentry.coordinate.column)",
+                            color: viewModel.sentryColor(for: index),
+                            isSelected: viewModel.selectedSentryID == sentry.id
+                        ) {
                             viewModel.selectSentry(sentry)
-                        } label: {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(viewModel.sentryColor(for: index).opacity(0.75))
-                                .frame(width: 44, height: 44)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .stroke(viewModel.selectedSentryID == sentry.id ? Color.white : Color.clear, lineWidth: 2)
-                                )
-                                .overlay(
-                                    Text("\(index + 1)")
-                                        .font(.caption2.bold())
-                                        .foregroundStyle(.white)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if let sentry = viewModel.selectedSentry {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Selected Sentry")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-
-                    Text("Coordinate: r\(sentry.coordinate.row) c\(sentry.coordinate.column)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-
-                    let rangeBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.scanRange ?? sentry.scanRange },
-                        set: { viewModel.updateSelectedSentryRange($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: rangeBinding, in: 1.0...32.0, step: 0.5)
-                        Text(String(format: "Scan Range: %.1f tiles", rangeBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    let centerBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.scanCenterDegrees ?? sentry.scanCenterDegrees },
-                        set: { viewModel.updateSelectedSentryCenter($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: centerBinding, in: -180...180, step: 1)
-                        Text(String(format: "Scan Center: %.0f°", centerBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    let arcBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.scanArcDegrees ?? sentry.scanArcDegrees },
-                        set: { viewModel.updateSelectedSentryArc($0) }
-                    )
-                    let angleRange = viewModel.sentryInitialAngleRange(sentry)
-                    let initialAngleBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.initialFacingDegrees ?? sentry.initialFacingDegrees },
-                        set: { viewModel.updateSelectedSentryInitialAngle($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: arcBinding, in: 10...240, step: 1)
-                        Text(String(format: "Sweep Arc: %.0f°", arcBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: initialAngleBinding, in: angleRange, step: 1)
-                        Text(String(format: "Initial Angle: %.0f°", initialAngleBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    let sweepBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.sweepSpeedDegreesPerSecond ?? sentry.sweepSpeedDegreesPerSecond },
-                        set: { viewModel.updateSelectedSentrySweepSpeed($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: sweepBinding, in: 10...360, step: 5)
-                        Text(String(format: "Sweep Speed: %.0f°/s", sweepBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    let kindBinding = Binding<SentryBlueprint.ProjectileKind>(
-                        get: { viewModel.selectedSentry?.projectileKind ?? sentry.projectileKind },
-                        set: { viewModel.updateSelectedSentryProjectileKind($0) }
-                    )
-                    Picker("Projectile Type", selection: kindBinding) {
-                        ForEach(SentryBlueprint.ProjectileKind.allCases, id: \.self) { kind in
-                            Text(kind.displayLabel).tag(kind)
                         }
                     }
-                    .pickerStyle(.segmented)
-
-                    let currentKind = viewModel.selectedSentry?.projectileKind ?? sentry.projectileKind
-
-                    let projectileBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.projectileSpeed ?? sentry.projectileSpeed },
-                        set: { viewModel.updateSelectedSentryProjectileSpeed($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: projectileBinding, in: 50...2000, step: 25)
-                        Text(String(format: currentKind == .laser ? "Beam Intensity: %.0f" : "Projectile Speed: %.0f", projectileBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .disabled(currentKind == .laser)
-
-                    let sizeBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.projectileSize ?? sentry.projectileSize },
-                        set: { viewModel.updateSelectedSentryProjectileSize($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: sizeBinding, in: 0.05...2.0, step: 0.05)
-                        Text(String(format: "Projectile Size: %.2f tiles", sizeBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    let lifetimeBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.projectileLifetime ?? sentry.projectileLifetime },
-                        set: { viewModel.updateSelectedSentryProjectileLifetime($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: lifetimeBinding, in: 0.1...12.0, step: 0.1)
-                        let label = currentKind == .laser ? "Beam Duration" : "Lifetime"
-                        Text(String(format: "%@: %.1fs", label, lifetimeBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    let burstBinding = Binding<Int>(
-                        get: { viewModel.selectedSentry?.projectileBurstCount ?? sentry.projectileBurstCount },
-                        set: { viewModel.updateSelectedSentryProjectileBurstCount($0) }
-                    )
-                    Stepper(value: burstBinding, in: 1...12) {
-                        Text("Burst Count: \(burstBinding.wrappedValue)")
-                    }
-
-                    let spreadBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.projectileSpreadDegrees ?? sentry.projectileSpreadDegrees },
-                        set: { viewModel.updateSelectedSentryProjectileSpread($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: spreadBinding, in: 0...90, step: 1)
-                        Text(String(format: "Spread: %.0f°", spreadBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .disabled(burstBinding.wrappedValue <= 1)
-
-                    if currentKind == .heatSeeking {
-                        let turnBinding = Binding<Double>(
-                            get: { viewModel.selectedSentry?.heatSeekingTurnRateDegreesPerSecond ?? sentry.heatSeekingTurnRateDegreesPerSecond },
-                            set: { viewModel.updateSelectedSentryHeatTurnRate($0) }
-                        )
-                        VStack(alignment: .leading, spacing: 4) {
-                            Slider(value: turnBinding, in: 30...720, step: 10)
-                            Text(String(format: "Turn Rate: %.0f°/s", turnBinding.wrappedValue))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    let cooldownBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.fireCooldown ?? sentry.fireCooldown },
-                        set: { viewModel.updateSelectedSentryCooldown($0) }
-                    )
-                    Stepper(value: cooldownBinding, in: 0.2...5.0, step: 0.1) {
-                        Text(String(format: "Cooldown: %.1fs", cooldownBinding.wrappedValue))
-                    }
-
-                    let toleranceBinding = Binding<Double>(
-                        get: { viewModel.selectedSentry?.aimToleranceDegrees ?? sentry.aimToleranceDegrees },
-                        set: { viewModel.updateSelectedSentryAimTolerance($0) }
-                    )
-                    Stepper(value: toleranceBinding, in: 2...45, step: 1) {
-                        Text(String(format: "Aim Tolerance: %.0f°", toleranceBinding.wrappedValue))
-                    }
-
-                    Button {
-                        viewModel.duplicateSelectedSentry()
-                    } label: {
-                        Label("Duplicate Sentry", systemImage: "plus.square.on.square")
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button(role: .destructive) {
-                        viewModel.removeSentry(sentry)
-                    } label: {
-                        Label("Remove Sentry", systemImage: "trash")
-                    }
-                    .buttonStyle(.bordered)
                 }
             }
         }
@@ -976,189 +1635,55 @@ struct MapEditorView: View {
 
         let ch = input.characters.lowercased()
         if ch == "a" || ch == "d" || ch == "w" || ch == " " { return true }
-        if input.modifiers.contains(.command), (ch == "z" || ch == "y" || ch == "r") { return true }
+        if input.modifiers.contains(.command), ["z", "y", "r", "c", "x", "v"].contains(ch) { return true }
+        if ch == "\r" || ch == "\n" { return true }
         return false
     }
 
     private var platformSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Platforms")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    viewModel.tool = .platform
-                } label: {
-                    Label("Platform Tool", systemImage: "hand.point.up.left.fill")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.bordered)
-            }
+        VStack(alignment: .leading, spacing: 10) {
+            header(title: "Platforms") { viewModel.addPlatformAtCenter() }
 
             let platforms = viewModel.blueprint.movingPlatforms
             if platforms.isEmpty {
-                Text("Use the Platform tool to drag out a platform, then adjust its path here.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                emptyHint("Drag with the Platform tool to define moving platforms.")
             } else {
-                let columns = Array(repeating: GridItem(.flexible(minimum: 32, maximum: 50), spacing: 8), count: 4)
-                LazyVGrid(columns: columns, spacing: 8) {
+                VStack(spacing: 6) {
                     ForEach(Array(platforms.enumerated()), id: \.element.id) { index, platform in
-                        Button {
+                        entityRow(
+                            title: "Platform \(index + 1)",
+                            subtitle: "r\(platform.origin.row) c\(platform.origin.column) → r\(platform.target.row) c\(platform.target.column)",
+                            color: viewModel.platformColor(for: index),
+                            isSelected: viewModel.selectedPlatformID == platform.id
+                        ) {
                             viewModel.selectPlatform(platform)
-                        } label: {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(viewModel.platformColor(for: index).opacity(0.75))
-                                .frame(width: 44, height: 44)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .stroke(viewModel.selectedPlatformID == platform.id ? Color.white : Color.clear, lineWidth: 2)
-                                )
-                                .overlay(
-                                    Text("\(index + 1)")
-                                        .font(.caption2.bold())
-                                        .foregroundStyle(.white)
-                                )
                         }
-                        .buttonStyle(.plain)
                     }
-                }
-            }
-
-            if let platform = viewModel.selectedPlatform {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Selected Platform")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-
-                    Text("Origin: r\(platform.origin.row) c\(platform.origin.column)  •  Size: \(platform.size.columns)×\(platform.size.rows)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-
-                    let rowBinding = Binding<Int>(
-                        get: { viewModel.selectedPlatform?.target.row ?? platform.target.row },
-                        set: { viewModel.updateSelectedPlatformTarget(row: $0) }
-                    )
-                    let colBinding = Binding<Int>(
-                        get: { viewModel.selectedPlatform?.target.column ?? platform.target.column },
-                        set: { viewModel.updateSelectedPlatformTarget(column: $0) }
-                    )
-
-                    Stepper(value: rowBinding, in: viewModel.platformTargetRowRange(platform)) {
-                        Text("Target Row: \(rowBinding.wrappedValue)")
-                    }
-
-                    Stepper(value: colBinding, in: viewModel.platformTargetColumnRange(platform)) {
-                        Text("Target Column: \(colBinding.wrappedValue)")
-                    }
-
-                    let speedBinding = Binding<Double>(
-                        get: { platform.speed },
-                        set: { viewModel.updateSelectedPlatformSpeed($0) }
-                    )
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: speedBinding, in: 0.1...5.0, step: 0.1)
-                        Text(String(format: "Speed: %.1f tiles/s", speedBinding.wrappedValue))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    let progressBinding = Binding<Double>(
-                        get: { viewModel.selectedPlatform?.initialProgress ?? platform.initialProgress },
-                        set: { viewModel.updateSelectedPlatformInitialProgress($0) }
-                    )
-                    VStack(alignment: .leading, spacing: 4) {
-                        Slider(value: progressBinding, in: 0...1, step: 0.01)
-                        Text(String(format: "Start Position: %.0f%%", progressBinding.wrappedValue * 100))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Button {
-                        viewModel.duplicateSelectedPlatform()
-                    } label: {
-                        Label("Duplicate Platform", systemImage: "plus.square.on.square")
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button(role: .destructive) {
-                        viewModel.removePlatform(platform)
-                    } label: {
-                        Label("Remove Platform", systemImage: "trash")
-                    }
-                    .buttonStyle(.bordered)
                 }
             }
         }
     }
 
     private var spawnSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Spawn Points")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button(action: addSpawn) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
-            }
+        VStack(alignment: .leading, spacing: 10) {
+            header(title: "Spawn Points") { addSpawn() }
 
-            if viewModel.blueprint.spawnPoints.isEmpty {
-                Text("No spawns yet. Paint with the Spawn tool or tap + to add one.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            let spawns = viewModel.blueprint.spawnPoints
+            if spawns.isEmpty {
+                emptyHint("No spawns yet. Use the Spawn tool or tap + to add one.")
             } else {
-                let spawns = viewModel.blueprint.spawnPoints
-                let columns = Array(repeating: GridItem(.flexible(minimum: 32, maximum: 50), spacing: 8), count: 4)
-                LazyVGrid(columns: columns, spacing: 8) {
-                    ForEach(Array(spawns.indices), id: \.self) { index in
-                        let spawn = spawns[index]
-                        Button {
+                VStack(spacing: 6) {
+                    ForEach(Array(spawns.enumerated()), id: \.element.id) { index, spawn in
+                        entityRow(
+                            title: spawn.name,
+                            subtitle: "r\(spawn.coordinate.row) c\(spawn.coordinate.column)",
+                            color: viewModel.spawnColor(for: index),
+                            isSelected: viewModel.selectedSpawnID == spawn.id
+                        ) {
                             viewModel.selectSpawn(spawn)
                             spawnNameDraft = spawn.name
-                        } label: {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(viewModel.spawnColor(for: index).opacity(0.85))
-                                .frame(width: 40, height: 40)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .stroke(viewModel.selectedSpawnID == spawn.id ? Color.white : Color.clear, lineWidth: 2)
-                                )
-                                .overlay(
-                                    Text("\(index + 1)")
-                                        .font(.caption2.bold())
-                                        .foregroundStyle(.white)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if viewModel.selectedSpawn != nil {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Selected Spawn")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-
-                    TextField("Name", text: $spawnNameDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { viewModel.renameSelectedSpawn(to: spawnNameDraft) }
-
-                    HStack(spacing: 8) {
-                        Button(action: { viewModel.renameSelectedSpawn(to: spawnNameDraft) }) {
-                            Label("Save Name", systemImage: "checkmark.circle")
-                        }
-                        Button(role: .destructive, action: viewModel.removeSelectedSpawn) {
-                            Label("Remove", systemImage: "trash")
                         }
                     }
-                    .buttonStyle(.bordered)
                 }
             }
         }
@@ -1171,6 +1696,9 @@ struct MapEditorView: View {
                 .foregroundStyle(.secondary)
             Button(action: viewModel.fillGround) {
                 Label("Fill Ground", systemImage: "square.stack.3d.up.fill")
+            }
+            Button(action: viewModel.buildRampTestLayouts) {
+                Label("Ramp Test Layout", systemImage: "triangle.lefthalf.filled")
             }
             Button(role: .destructive, action: viewModel.clearLevel) {
                 Label("Clear Map", systemImage: "trash")
@@ -1189,6 +1717,59 @@ struct MapEditorView: View {
     private func focusEditorIfNeeded() {
         if !editorFocused {
             focusEditor()
+        }
+    }
+
+    private func beginExport() {
+        pendingExportDocument = MapFileDocument(document: viewModel.makeMapDocument())
+        pendingExportFilename = viewModel.makeExportFilename()
+        isShowingExporter = true
+    }
+
+    private func handleImportResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else {
+                persistenceErrorMessage = "No file selected."
+                return
+            }
+            loadMap(from: url)
+        case .failure(let error):
+            persistenceErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadMap(from url: URL) {
+        var data: Data?
+        let needsStop = url.startAccessingSecurityScopedResource()
+        defer {
+            if needsStop {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            persistenceErrorMessage = error.localizedDescription
+            return
+        }
+
+        guard let data else {
+            persistenceErrorMessage = "The selected file could not be read."
+            return
+        }
+
+        do {
+            try viewModel.importJSON(data)
+        } catch {
+            if let error = error as? MapDocumentError {
+                persistenceErrorMessage = error.localizedDescription
+            } else if error is DecodingError {
+                persistenceErrorMessage = "The selected file is not a valid map." 
+            } else {
+                persistenceErrorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1216,7 +1797,9 @@ struct MapEditorView: View {
 
         if input.key == .escape {
             action = {
-                if isPreviewing {
+                if viewModel.canCommitSelectionMove {
+                    viewModel.cancelSelectionMove()
+                } else if isPreviewing {
                     isPreviewing = false
                 }
                 focusEditor()
@@ -1236,6 +1819,24 @@ struct MapEditorView: View {
                 }
             } else if normalized.contains("r") {
                 action = openPreviewIfPossible
+            } else if normalized.contains("c") {
+                action = {
+                    if viewModel.hasSelection { viewModel.copySelection() }
+                }
+            } else if normalized.contains("x") {
+                action = {
+                    if viewModel.hasSelection { viewModel.cutSelection() }
+                }
+            } else if normalized.contains("v") {
+                action = {
+                    if viewModel.canPasteSelection { viewModel.pasteSelection() }
+                }
+            }
+        } else if normalized == "\r" || normalized == "\n" {
+            if viewModel.canCommitSelectionMove {
+                action = {
+                    viewModel.commitSelectionMove()
+                }
             }
         }
 
@@ -1246,33 +1847,6 @@ struct MapEditorView: View {
         }
 
         return true
-    }
-
-    private var floatingControls: some View {
-        HStack(spacing: 12) {
-            Button(action: viewModel.toggleGrid) {
-                Image(systemName: viewModel.showGrid ? "square.grid.3x3.fill" : "square.grid.3x3")
-                    .font(.title3)
-                    .padding(6)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(viewModel.showGrid ? "Hide Grid" : "Show Grid")
-
-            Button(action: openPreviewIfPossible) {
-                Image(systemName: "play.circle")
-                    .font(.title3)
-                    .padding(6)
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.blueprint.spawnPoints.isEmpty)
-            .opacity(viewModel.blueprint.spawnPoints.isEmpty ? 0.4 : 1.0)
-            .accessibilityLabel("Playtest Level")
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.thinMaterial)
-        .clipShape(Capsule())
-        .shadow(radius: 6, y: 2)
     }
 
     private func openPreviewIfPossible() {

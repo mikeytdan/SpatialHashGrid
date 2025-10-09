@@ -29,6 +29,21 @@ final class PhysicsWorld {
     private var platformVelocities: [ColliderID: Vec2] = [:]
     private var platformDisplacements: [ColliderID: Vec2] = [:]
 
+    struct TileOcclusionDebugInfo: Sendable {
+        let tileID: ColliderID
+        var rampID: ColliderID?
+        var reason: String
+        var normal: Vec2
+        var contactPoint: Vec2
+        var supportID: ColliderID?
+        var sameRow: Bool
+        var rampBelow: Bool
+        var adjacentLeft: Bool
+        var adjacentRight: Bool
+    }
+
+    private var lastTileOcclusionDebug: TileOcclusionDebugInfo?
+
     init(cellSize: Double = 64.0, reserve: Int = 1024, estimateCells: Int = 2048) {
         self.staticGrid = SpatialHashGrid<ColliderID>(cellSize: cellSize, reserve: reserve, estimateCells: estimateCells)
         self.dynamicGrid = SpatialHashGrid<ColliderID>(cellSize: cellSize, reserve: reserve, estimateCells: estimateCells)
@@ -371,6 +386,43 @@ extension PhysicsWorld {
                     continue
                 }
 
+                if let capsuleRadius = capsuleRadius, capsuleRadius > 0 {
+                    guard let hit = capsulePenetration(position: position, halfSize: halfSize, radius: capsuleRadius, rect: b) else {
+                        continue
+                    }
+
+                    if allowOneWay && other.material.oneWay && hit.normal.y >= 0 {
+                        continue
+                    }
+
+                    if case .aabb = other.shape,
+                       other.type == .staticTile,
+                       tileContactOccludedByRamp(tile: other, contactPoint: hit.point, normal: hit.normal, support: supportCandidateFromContacts(outContacts)) {
+                        continue
+                    }
+
+                    let normal = hit.normal
+                    let depth = hit.depth
+                    position += normal * (depth + separationEpsilon)
+
+                    if normal.x > 0 {
+                        velocity.x = max(velocity.x, 0)
+                    } else if normal.x < 0 {
+                        velocity.x = min(velocity.x, 0)
+                    }
+
+                    if normal.y > 0 {
+                        velocity.y = max(velocity.y, 0)
+                    } else if normal.y < 0 {
+                        velocity.y = min(velocity.y, 0)
+                    }
+
+                    outContacts.append(Contact(other: cid, normal: normal, depth: depth, point: hit.point))
+
+                    resolvedAny = true
+                    break
+                }
+
                 var normal = Vec2(0, 0)
                 var depth: Double = 0
 
@@ -397,6 +449,13 @@ extension PhysicsWorld {
                     if normal.y >= 0 { continue }
                 }
 
+                let contactPoint = contactPoint(position: position, halfSize: halfSize, normal: normal)
+                if case .aabb = other.shape,
+                   other.type == .staticTile,
+                   tileContactOccludedByRamp(tile: other, contactPoint: contactPoint, normal: normal, support: supportCandidateFromContacts(outContacts)) {
+                    continue
+                }
+
                 position += normal * (depth + separationEpsilon)
 
                 if normal.x > 0 {
@@ -411,7 +470,6 @@ extension PhysicsWorld {
                     velocity.y = min(velocity.y, 0)
                 }
 
-                let contactPoint = contactPoint(position: position, halfSize: halfSize, normal: normal)
                 outContacts.append(Contact(other: cid, normal: normal, depth: depth, point: contactPoint))
 
                 resolvedAny = true
@@ -450,7 +508,75 @@ extension PhysicsWorld {
                 let overlapY = min(startAABB.max.y, b.max.y) - max(startAABB.min.y, b.min.y)
                 if overlapY <= 0 { continue }
 
-                if case .ramp = other.shape {
+                if case .ramp(let rampData) = other.shape {
+                    guard let rampInfo = rampContactInfo(
+                        moving: startAABB,
+                        ramp: b,
+                        kind: rampData.kind
+                    ) else { continue }
+
+                    if allowOneWay && other.material.oneWay {
+                        let startBottom = startAABB.max.y
+                        let surfaceTop = rampInfo.ySurface
+                        if startBottom - surfaceTop > 4 { continue }
+                    }
+
+                    let (footCenter, footRadius) = footParameters(position: position, halfSize: halfSize, capsuleRadius: capsuleRadius)
+                    let planePoint = rampInfo.planePoint
+                    let currentDistance = simd_dot(footCenter - planePoint, rampInfo.normal)
+                    let requiredDistance = footRadius + separationEpsilon
+                    let deltaNormal = simd_dot(Vec2(desiredMove, 0), rampInfo.normal)
+                    if deltaNormal < 0 {
+                        let maxAllowedNormalDecrease = currentDistance - requiredDistance
+                        if maxAllowedNormalDecrease <= 0 {
+                            if (desiredMove > 0 && permitted > 0) || (desiredMove < 0 && permitted < 0) {
+                                permitted = 0
+                                let normal = rampInfo.normal
+                                let finalPos = Vec2(position.x, position.y)
+                                let point = rampContactPoint(position: finalPos, halfSize: halfSize, normal: normal, capsuleRadius: capsuleRadius)
+                                bestContact = Contact(other: cid, normal: normal, depth: 0, point: point)
+                            }
+                            continue
+                        }
+
+                        let ratio = maxAllowedNormalDecrease / -deltaNormal
+                        let candidateMove = desiredMove * ratio
+                        let newMove: Double
+                        if desiredMove > 0 {
+                            newMove = max(0, min(desiredMove, candidateMove))
+                            if newMove < permitted {
+                                permitted = newMove
+                                let normal = rampInfo.normal
+                                let finalPos = Vec2(position.x + permitted, position.y)
+                                let depth = abs(desiredMove - permitted)
+                                let point = rampContactPoint(position: finalPos, halfSize: halfSize, normal: normal, capsuleRadius: capsuleRadius)
+                                bestContact = Contact(other: cid, normal: normal, depth: depth, point: point)
+                            }
+                        } else {
+                            newMove = min(0, max(desiredMove, candidateMove))
+                            if newMove > permitted {
+                                permitted = newMove
+                                let normal = rampInfo.normal
+                                let finalPos = Vec2(position.x + permitted, position.y)
+                                let depth = abs(desiredMove - permitted)
+                                let point = rampContactPoint(position: finalPos, halfSize: halfSize, normal: normal, capsuleRadius: capsuleRadius)
+                                bestContact = Contact(other: cid, normal: normal, depth: depth, point: point)
+                            }
+                        }
+                    }
+                    continue
+                }
+
+                let verticalSlack: Double
+                if let capsuleRadius = capsuleRadius, capsuleRadius > 0 {
+                    verticalSlack = max(1.5, capsuleRadius * 0.25)
+                } else {
+                    verticalSlack = 1.5
+                }
+                let bottom = position.y + halfSize.y
+                let top = position.y - halfSize.y
+                if overlapY <= verticalSlack,
+                   (bottom <= b.min.y + verticalSlack || top >= b.max.y - verticalSlack) {
                     continue
                 }
 
@@ -466,7 +592,9 @@ extension PhysicsWorld {
                                 normal: Vec2(-1, 0)
                             )
                             let depth = abs(desiredMove - permitted)
-                            bestContact = Contact(other: cid, normal: Vec2(-1, 0), depth: depth, point: point)
+                            if !(other.type == .staticTile && tileContactOccludedByRamp(tile: other, contactPoint: point, normal: Vec2(-1, 0), support: nil)) {
+                                bestContact = Contact(other: cid, normal: Vec2(-1, 0), depth: depth, point: point)
+                            }
                         }
                     }
                 } else {
@@ -481,7 +609,9 @@ extension PhysicsWorld {
                                 normal: Vec2(1, 0)
                             )
                             let depth = abs(desiredMove - permitted)
-                            bestContact = Contact(other: cid, normal: Vec2(1, 0), depth: depth, point: point)
+                            if !(other.type == .staticTile && tileContactOccludedByRamp(tile: other, contactPoint: point, normal: Vec2(1, 0), support: nil)) {
+                                bestContact = Contact(other: cid, normal: Vec2(1, 0), depth: depth, point: point)
+                            }
                         }
                     }
                 }
@@ -534,6 +664,55 @@ extension PhysicsWorld {
                         }
                     }
                     continue
+                }
+
+                if let capsuleRadius = capsuleRadius, capsuleRadius > 0 {
+                    if desiredMove > 0 { // moving downward
+                        if allowOneWay && other.material.oneWay {
+                            let startBottom = startAABB.max.y
+                            let platformTop = b.min.y
+                            if startBottom - platformTop > 4 { continue }
+                        }
+                        if let result = capsuleDownwardSweep(
+                            position: position,
+                            halfSize: halfSize,
+                            radius: capsuleRadius,
+                            tile: b,
+                            move: desiredMove,
+                            separation: separationEpsilon
+                        ) {
+                            if result.move < permitted {
+                                permitted = result.move
+                                let depth = abs(desiredMove - permitted)
+                                if depth > separationEpsilon {
+                                    if !(other.type == .staticTile && tileContactOccludedByRamp(tile: other, contactPoint: result.point, normal: Vec2(0, -1), support: nil)) {
+                                        bestContact = Contact(other: cid, normal: Vec2(0, -1), depth: depth, point: result.point)
+                                    }
+                                }
+                            }
+                        }
+                        continue
+                    } else { // moving upward
+                        if let result = capsuleUpwardSweep(
+                            position: position,
+                            halfSize: halfSize,
+                            radius: capsuleRadius,
+                            tile: b,
+                            move: desiredMove,
+                            separation: separationEpsilon
+                        ) {
+                            if result.move > permitted {
+                                permitted = result.move
+                                let depth = abs(desiredMove - permitted)
+                                if depth > separationEpsilon {
+                                    if !(other.type == .staticTile && tileContactOccludedByRamp(tile: other, contactPoint: result.point, normal: Vec2(0, 1), support: nil)) {
+                                        bestContact = Contact(other: cid, normal: Vec2(0, 1), depth: depth, point: result.point)
+                                    }
+                                }
+                            }
+                        }
+                        continue
+                    }
                 }
 
                 if desiredMove > 0 { // moving downward (y+)
@@ -660,6 +839,14 @@ extension PhysicsWorld {
         }
     }
 
+    func rampPlaneInfo(colliderID: ColliderID) -> (normal: Vec2, planePoint: Vec2)? {
+        guard let collider = colliders[colliderID] else { return nil }
+        guard case .ramp(let data) = collider.shape else { return nil }
+        let normal = rampNormal(ramp: collider.aabb, kind: data.kind)
+        let planePoint = rampPlanePoint(ramp: collider.aabb, kind: data.kind)
+        return (normal, planePoint)
+    }
+
     func footParameters(position: Vec2, halfSize: Vec2, capsuleRadius: Double?) -> (center: Vec2, radius: Double) {
         let radius = max(capsuleRadius ?? 0, 0)
         let offset = max(0, halfSize.y - radius)
@@ -670,6 +857,359 @@ extension PhysicsWorld {
     func rampContactPoint(position: Vec2, halfSize: Vec2, normal: Vec2, capsuleRadius: Double?) -> Vec2 {
         let (center, radius) = footParameters(position: position, halfSize: halfSize, capsuleRadius: capsuleRadius)
         return center - normal * radius
+    }
+
+    func capsulePenetration(
+        position: Vec2,
+        halfSize: Vec2,
+        radius: Double,
+        rect: AABB
+    ) -> (normal: Vec2, depth: Double, point: Vec2)? {
+        guard radius > 0 else { return nil }
+
+        let cylinderHalfHeight = max(0, halfSize.y - radius)
+        let footCenter = Vec2(position.x, position.y + cylinderHalfHeight)
+        let headCenter = Vec2(position.x, position.y - cylinderHalfHeight)
+
+        if let ground = circleVsAABB(
+            center: footCenter,
+            radius: radius,
+            rect: rect,
+            preferredNormal: Vec2(0, -1)
+        ) {
+            return ground
+        }
+
+        if let ceiling = circleVsAABB(
+            center: headCenter,
+            radius: radius,
+            rect: rect,
+            preferredNormal: Vec2(0, 1)
+        ) {
+            return ceiling
+        }
+
+        if let side = cylinderVsAABB(
+            position: position,
+            radius: radius,
+            rect: rect,
+            cylinderHalfHeight: cylinderHalfHeight
+        ) {
+            return side
+        }
+
+        if let groundCorner = circleVsAABB(
+            center: footCenter,
+            radius: radius,
+            rect: rect,
+            preferredNormal: nil
+        ) {
+            return groundCorner
+        }
+
+        if let ceilingCorner = circleVsAABB(
+            center: headCenter,
+            radius: radius,
+            rect: rect,
+            preferredNormal: nil
+        ) {
+            return ceilingCorner
+        }
+
+        return nil
+    }
+
+    func capsuleDownwardSweep(
+        position: Vec2,
+        halfSize: Vec2,
+        radius: Double,
+        tile: AABB,
+        move: Double,
+        separation: Double
+    ) -> (move: Double, point: Vec2)? {
+        guard move > 0 else { return nil }
+
+        let cylinderHalfHeight = max(0, halfSize.y - radius)
+        let circleCenter = Vec2(position.x, position.y + cylinderHalfHeight)
+        let horizontalMargin = radius * 0.25
+        if circleCenter.x < tile.min.x - horizontalMargin || circleCenter.x > tile.max.x + horizontalMargin {
+            return nil
+        }
+        let nearestX = min(max(circleCenter.x, tile.min.x), tile.max.x)
+        let dx = abs(circleCenter.x - nearestX)
+        if dx > radius { return nil }
+
+        let circleBottom = circleCenter.y + radius
+        let tileTop = tile.min.y
+        let gap = tileTop - circleBottom
+        if gap > move { return nil }
+
+        if gap <= 0 {
+            return (0, Vec2(nearestX, tileTop))
+        }
+
+        let candidate = gap - separation
+        if candidate >= move { return nil }
+
+        let point = Vec2(nearestX, tileTop)
+        return (max(0, candidate), point)
+    }
+
+    func capsuleUpwardSweep(
+        position: Vec2,
+        halfSize: Vec2,
+        radius: Double,
+        tile: AABB,
+        move: Double,
+        separation: Double
+    ) -> (move: Double, point: Vec2)? {
+        guard move < 0 else { return nil }
+
+        let cylinderHalfHeight = max(0, halfSize.y - radius)
+        let circleCenter = Vec2(position.x, position.y - cylinderHalfHeight)
+        let horizontalMargin = radius * 0.25
+        if circleCenter.x < tile.min.x - horizontalMargin || circleCenter.x > tile.max.x + horizontalMargin {
+            return nil
+        }
+        let nearestX = min(max(circleCenter.x, tile.min.x), tile.max.x)
+        let dx = abs(circleCenter.x - nearestX)
+        if dx > radius { return nil }
+
+        let circleTop = circleCenter.y - radius
+        let tileBottom = tile.max.y
+        let gap = circleTop - tileBottom
+        let moveMagnitude = -move
+        if gap > moveMagnitude { return nil }
+
+        if gap <= 0 {
+            return (0, Vec2(nearestX, tileBottom))
+        }
+
+        let candidate = gap - separation
+        if candidate >= moveMagnitude { return nil }
+
+        let point = Vec2(nearestX, tileBottom)
+        return (-max(0, candidate), point)
+    }
+
+    func circleVsAABB(
+        center: Vec2,
+        radius: Double,
+        rect: AABB,
+        preferredNormal: Vec2?
+    ) -> (normal: Vec2, depth: Double, point: Vec2)? {
+        let closestX = min(max(center.x, rect.min.x), rect.max.x)
+        let closestY = min(max(center.y, rect.min.y), rect.max.y)
+        let closest = Vec2(closestX, closestY)
+        let delta = center - closest
+        let distSq = simd_length_squared(delta)
+        let radiusSq = radius * radius
+        let epsilon: Double = 1e-9
+
+        if distSq >= radiusSq { return nil }
+
+        var normal: Vec2
+        let penetration: Double
+
+        if distSq > epsilon {
+            let dist = sqrt(distSq)
+            penetration = radius - dist
+            var dir = delta / dist
+            if let prefer = preferredNormal {
+                dir = prefer
+            }
+            normal = dir
+        } else {
+            penetration = radius
+            if let prefer = preferredNormal {
+                normal = prefer
+            } else {
+                let left = center.x - rect.min.x
+                let right = rect.max.x - center.x
+                let top = center.y - rect.min.y
+                let bottom = rect.max.y - center.y
+
+                let minEdge = min(min(left, right), min(top, bottom))
+                if minEdge == left {
+                    normal = Vec2(-1, 0)
+                } else if minEdge == right {
+                    normal = Vec2(1, 0)
+                } else if minEdge == top {
+                    normal = Vec2(0, -1)
+                } else {
+                    normal = Vec2(0, 1)
+                }
+            }
+        }
+
+        if penetration <= epsilon { return nil }
+        var contact = closest
+        if let prefer = preferredNormal {
+            if abs(prefer.x) > 0.5 {
+                contact.x = prefer.x < 0 ? rect.min.x : rect.max.x
+            }
+            if abs(prefer.y) > 0.5 {
+                contact.y = prefer.y < 0 ? rect.min.y : rect.max.y
+            }
+        }
+        return (normal, penetration, contact)
+    }
+
+    func cylinderVsAABB(
+        position: Vec2,
+        radius: Double,
+        rect: AABB,
+        cylinderHalfHeight: Double
+    ) -> (normal: Vec2, depth: Double, point: Vec2)? {
+        guard cylinderHalfHeight > 0 else { return nil }
+        let segMinY = position.y - cylinderHalfHeight
+        let segMaxY = position.y + cylinderHalfHeight
+        let overlapY = min(segMaxY, rect.max.y) - max(segMinY, rect.min.y)
+        if overlapY <= 0 { return nil }
+
+        let epsilon: Double = 1e-9
+        var best: (normal: Vec2, depth: Double, point: Vec2)? = nil
+
+        func consider(normal: Vec2, depth: Double, contactX: Double) {
+            guard depth > epsilon else { return }
+            let contactY = min(max(position.y, rect.min.y), rect.max.y)
+            let contact = Vec2(contactX, contactY)
+            if let current = best {
+                if depth < current.depth { best = (normal, depth, contact) }
+            } else {
+                best = (normal, depth, contact)
+            }
+        }
+
+        let overlapLeft = (position.x + radius) - rect.min.x
+        if overlapLeft > 0 {
+            consider(normal: Vec2(-1, 0), depth: overlapLeft, contactX: rect.min.x)
+        }
+
+        let overlapRight = rect.max.x - (position.x - radius)
+        if overlapRight > 0 {
+            consider(normal: Vec2(1, 0), depth: overlapRight, contactX: rect.max.x)
+        }
+
+        return best
+    }
+
+    func supportCandidateFromContacts(_ contacts: [Contact]) -> Contact? {
+        var best: Contact?
+        for c in contacts where c.normal.y <= -0.25 {
+            if let current = best {
+                if c.depth > current.depth { best = c }
+            } else {
+                best = c
+            }
+        }
+        return best
+    }
+
+    func tileContactOccludedByRamp(tile: Collider, contactPoint: Vec2, normal: Vec2, support: Contact?) -> Bool {
+        guard abs(normal.x) > 0.5 else { return false }
+
+        let tolerance: Double = 0.51
+        var query = tile.aabb
+        query.min.y -= tolerance
+        query.max.y += tolerance
+        query.min.x -= tolerance
+        query.max.x += tolerance
+        let candidates = queryBroadphase(aabb: query)
+        var debug = TileOcclusionDebugInfo(
+            tileID: tile.id,
+            rampID: nil,
+            reason: "no-ramp",
+            normal: normal,
+            contactPoint: contactPoint,
+            supportID: support?.other,
+            sameRow: false,
+            rampBelow: false,
+            adjacentLeft: false,
+            adjacentRight: false
+        )
+        for rid in candidates {
+            if rid == tile.id { continue }
+            guard let ramp = colliders[rid] else { continue }
+            guard ramp.type == .staticTile else { continue }
+            guard case .ramp(let data) = ramp.shape else { continue }
+
+            let sameRow = abs(ramp.aabb.min.y - tile.aabb.min.y) < 0.51 && abs(ramp.aabb.max.y - tile.aabb.max.y) < 0.51
+            let rampBelowTile = abs(ramp.aabb.max.y - tile.aabb.min.y) < 0.51
+            if !(sameRow || rampBelowTile) {
+                // Logged for debugging tile/ramp seams — if you see “row-mismatch”, the ramp never qualified.
+                debug.rampID = ramp.id
+                debug.sameRow = sameRow
+                debug.rampBelow = rampBelowTile
+                debug.reason = "row-mismatch"
+                lastTileOcclusionDebug = debug
+                continue
+            }
+
+            let adjacentLeft = abs(ramp.aabb.max.x - tile.aabb.min.x) <= tolerance
+            let adjacentRight = abs(ramp.aabb.min.x - tile.aabb.max.x) <= tolerance
+            let overlapX = min(ramp.aabb.max.x, tile.aabb.max.x) - max(ramp.aabb.min.x, tile.aabb.min.x)
+            let overlapsHorizontally = overlapX > 0
+
+            if normal.x < 0 {
+                guard adjacentLeft || overlapsHorizontally else {
+                    debug.rampID = ramp.id
+                    debug.sameRow = sameRow
+                    debug.rampBelow = rampBelowTile
+                    debug.adjacentLeft = adjacentLeft
+                    debug.adjacentRight = adjacentRight
+                    debug.reason = "no-adj-left"
+                    lastTileOcclusionDebug = debug
+                    continue
+                }
+            } else {
+                guard adjacentRight || overlapsHorizontally else {
+                    debug.rampID = ramp.id
+                    debug.sameRow = sameRow
+                    debug.rampBelow = rampBelowTile
+                    debug.adjacentLeft = adjacentLeft
+                    debug.adjacentRight = adjacentRight
+                    debug.reason = "no-adj-right"
+                    lastTileOcclusionDebug = debug
+                    continue
+                }
+            }
+
+            debug.rampID = ramp.id
+            debug.sameRow = sameRow
+            debug.rampBelow = rampBelowTile
+            debug.adjacentLeft = adjacentLeft
+            debug.adjacentRight = adjacentRight
+            if overlapsHorizontally {
+                debug.reason = "horizontal-overlap"
+                if rampBelowTile {
+                    lastTileOcclusionDebug = debug
+                    return true
+                }
+            }
+
+            if let support = support, support.other == ramp.id {
+                // Support contact matches the ramp; tile should be ignored.
+                debug.reason = "covered-by-support"
+                lastTileOcclusionDebug = debug
+                return true
+            }
+
+            let clampedX = min(max(contactPoint.x, ramp.aabb.min.x), ramp.aabb.max.x)
+            let surfaceY = rampSurfaceY(ramp: ramp.aabb, kind: data.kind, x: clampedX)
+            if contactPoint.y >= surfaceY - 1.0 {
+                debug.reason = overlapsHorizontally ? "overlap-ramp" : "adjacent-ramp"
+                lastTileOcclusionDebug = debug
+                return true
+            }
+        }
+        debug.reason = "no-match"
+        lastTileOcclusionDebug = debug
+        return false
+    }
+
+    func latestTileOcclusionDebugInfo() -> TileOcclusionDebugInfo? {
+        lastTileOcclusionDebug
     }
 
     func normalized(_ v: Vec2) -> Vec2 {

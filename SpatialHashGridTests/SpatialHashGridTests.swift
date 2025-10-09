@@ -4,6 +4,9 @@
 //
 //  Created by Michael Daniels on 9/25/25.
 //
+//  Coverage Notes:
+//  - 2025-10-05: Added ramp edge slide regression (walkingOffTileCornerDoesNotStick).
+//  - 2025-10-05: Added CharacterController ramp speed, jump, and climb regressions.
 
 import Foundation
 import Testing

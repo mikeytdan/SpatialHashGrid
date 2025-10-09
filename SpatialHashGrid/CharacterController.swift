@@ -20,12 +20,16 @@ final class CharacterController {
     // Physical tuning
     var width: Double = 28
     var height: Double = 60
+    private(set) var capsuleRadius: Double = 12
     var moveSpeed: Double = 380
     var airControl: Double = 0.55
     var jumpImpulse: Double = 820
     var wallJumpImpulse: Vec2 = Vec2(560, -820)
     var maxFallSpeed: Double = 1500
     var wallSlideSpeed: Double = 240
+    var allowSlopeSlide: Bool = false
+    var rampUphillSpeedMultiplier: Double = 1.0
+    var rampDownhillSpeedMultiplier: Double = 1.0
     var groundFriction: Double = 12.0
     var coyoteTime: Double = 0.12
     var extraJumps: Int = 1
@@ -35,25 +39,32 @@ final class CharacterController {
     // State
     var body: PhysicsWorld.BodyState
     var collisions = CollisionState()
+    private(set) var supportContact: SurfaceContact? = nil
     private var lastPlatformID: ColliderID? = nil
     private var suppressPlatformCarry: Bool = false
     var wasGroundedLastFrame: Bool = false
     var facing: Int = 1 // 1 right, -1 left
     private(set) var movementPhase: MovementPhase = .idle
     private var landStateTimer: Double = 0
+    private var desiredGroundVelocityX: Double = 0
+
+    var isSuppressingPlatformCarry: Bool { suppressPlatformCarry }
 
     init(world: PhysicsWorld, spawn: Vec2) {
         self.world = world
-        let radius = width * 0.5
-        let half = Vec2(width * 0.5, height * 0.5)
+        let baseRadius = width * 0.5
+        let capsuleRadius = max(6.0, baseRadius - 3.0)
+        let half = Vec2(capsuleRadius, height * 0.5)
+        let capsuleHeight = max(0, height - 2.0 * capsuleRadius)
+        self.capsuleRadius = capsuleRadius
+        self.width = capsuleRadius * 2.0
         let aabb = AABB(
             min: Vec2(spawn.x - half.x, spawn.y - half.y),
             max: Vec2(spawn.x + half.x, spawn.y + half.y)
         )
-        let capsuleHeight = max(0, height - 2.0 * radius)
-        let shape = Shape.capsule(CapsuleData(radius: radius, height: capsuleHeight))
+        let shape = Shape.capsule(CapsuleData(radius: capsuleRadius, height: capsuleHeight))
         self.id = world.addDynamicEntity(aabb: aabb, material: Material(), shape: shape)
-        self.body = PhysicsWorld.BodyState(position: spawn, velocity: Vec2(0, 0), size: half, capsuleRadius: radius)
+        self.body = PhysicsWorld.BodyState(position: spawn, velocity: Vec2(0, 0), size: half, capsuleRadius: capsuleRadius)
     }
 
     func setPosition(_ p: Vec2) {
@@ -67,6 +78,7 @@ final class CharacterController {
 
     func update(input: InputState, dt: Double) {
         collisions.reset()
+        supportContact = nil
 
         // Track platform velocity from the previous grounded frame so we can work in platform space.
         let platformSample: (delta: Vec2, velocity: Vec2) = {
@@ -94,7 +106,9 @@ final class CharacterController {
             relativeVx += (-relativeVx) * k
         }
         if abs(relativeVx) < 1e-4 { relativeVx = 0 }
+        let desiredWorldVx = desiredRelativeVx + platformVelocity.x
         body.velocity.x = relativeVx + platformVelocity.x
+        desiredGroundVelocityX = hasInput ? desiredWorldVx : body.velocity.x
         if hasInput { facing = input.moveX > 0 ? 1 : -1 }
 
         // Clamp fall speed prior to integration; final clamp happens post integration as well.
@@ -144,10 +158,78 @@ final class CharacterController {
             guard let other = world.collider(for: c.other) else { continue }
             collisions.absorb(contact: c, with: other)
 
-            if c.normal.y < -0.5 { body.velocity.y = min(0, body.velocity.y) }
-            else if c.normal.y > 0.5 { body.velocity.y = max(0, body.velocity.y) }
-            else if c.normal.x > 0.5 { body.velocity.x = max(0, body.velocity.x) }
-            else if c.normal.x < -0.5 { body.velocity.x = min(0, body.velocity.x) }
+            // Ramp & tile resolution share the same absorption; we project velocity off every contact normal
+            // here so both blue (up-right) and green (up-left) ramps cancel only the component pushing into them.
+            let normal = normalized(c.normal)
+            let vn = simd_dot(body.velocity, normal)
+            if vn < 0 {
+                body.velocity -= normal * vn
+            }
+        }
+
+        supportContact = selectSupportContact()
+        let grounded = supportContact != nil
+
+        if !allowSlopeSlide,
+           !hasInput,
+           let support = supportContact,
+           abs(support.normal.x) > 0.05 {
+            // Friction when idle on ramps; applies equally to both mirrored slopes.
+            let normal = support.normal
+            let tangent = Vec2(-normal.y, normal.x)
+            let tangentialSpeed = simd_dot(body.velocity, tangent)
+            if abs(tangentialSpeed) > 1 {
+                body.velocity -= tangent * tangentialSpeed
+            }
+        }
+
+        if let support = supportContact,
+           let collider = world.collider(for: support.other),
+           case .ramp(let rampData) = collider.shape,
+           abs(support.normal.y) < 0.99 {
+            let foot = footParameters()
+            let clampedX = min(max(foot.center.x, collider.aabb.min.x), collider.aabb.max.x)
+            let surfaceY = world.rampSurfaceY(ramp: collider.aabb, kind: rampData.kind, x: clampedX)
+            let targetFootCenterY = surfaceY - foot.radius
+            let deltaY = targetFootCenterY - foot.center.y
+            if !input.jumpPressed, abs(deltaY) > 0.001 {
+                body.position.y += deltaY
+            }
+
+            var tangent = Vec2(-support.normal.y, support.normal.x)
+            let tangentLen = simd_length(tangent)
+            if tangentLen > 1e-5 {
+                tangent /= tangentLen
+
+                let uphill = tangent.y < 0
+                let multiplier = max(0.0, uphill ? rampUphillSpeedMultiplier : rampDownhillSpeedMultiplier)
+                let horizontalTarget = desiredGroundVelocityX * multiplier
+                let drive = hasInput ? horizontalTarget : body.velocity.x
+                if drive * tangent.x < 0 {
+                    tangent = -tangent
+                }
+
+                if !input.jumpPressed {
+                    let axis = max(abs(tangent.x), 0.05)
+                    let desiredAlong: Double
+                    if hasInput {
+                        desiredAlong = horizontalTarget / axis
+                    } else if abs(horizontalTarget) > 1 {
+                        desiredAlong = horizontalTarget / axis
+                    } else {
+                        desiredAlong = 0
+                    }
+                    let currentAlong = simd_dot(body.velocity, tangent)
+                    let blend = hasInput ? 1.0 : 0.25
+                    let newAlong = currentAlong + (desiredAlong - currentAlong) * blend
+                    body.velocity += tangent * (newAlong - currentAlong)
+                }
+            }
+        }
+
+        if grounded, !hasInput {
+            body.velocity.x *= 0.2
+            if abs(body.velocity.x) < 1 { body.velocity.x = 0 }
         }
 
         // Wall grab/slide
@@ -162,7 +244,7 @@ final class CharacterController {
         }
 
         // Coyote time & multi-jump reset
-        if collisions.grounded {
+        if grounded {
             coyoteTimer = coyoteTime
             jumpsRemaining = extraJumps
         } else {
@@ -174,7 +256,7 @@ final class CharacterController {
         // Jump handling
         if input.jumpPressed {
             var didJump = false
-            if collisions.grounded || coyoteTimer > 0 {
+            if grounded || coyoteTimer > 0 {
                 body.velocity.y = platformVelocity.y - jumpImpulse
                 didJump = true
             } else if grabbingWall {
@@ -199,7 +281,6 @@ final class CharacterController {
         // Clamp post-integration fall speed
         if body.velocity.y > maxFallSpeed { body.velocity.y = maxFallSpeed }
 
-        let grounded = collisions.grounded
         let justLanded = grounded && !wasGroundedLastFrame
 
         if performedJump {
@@ -208,9 +289,13 @@ final class CharacterController {
             wasGroundedLastFrame = grounded
         }
 
-        if grounded, let pid = collisions.onPlatform {
+        if grounded {
             if !performedJump { suppressPlatformCarry = false }
-            lastPlatformID = pid
+            if let support = supportContact, support.type == .movingPlatform {
+                lastPlatformID = support.other
+            } else if let pid = collisions.onPlatform {
+                lastPlatformID = pid
+            }
         } else if !performedJump {
             lastPlatformID = nil
         }
@@ -235,13 +320,15 @@ final class CharacterController {
     func setBodyDimensions(width: Double, height: Double) {
         let clampedWidth = max(4.0, width)
         let clampedHeight = max(4.0, height)
-        self.width = clampedWidth
+        let newRadius = max(6.0, clampedWidth * 0.5 - 3.0)
+        self.width = newRadius * 2.0
         self.height = clampedHeight
+        capsuleRadius = newRadius
         let previousHalf = body.size
         let previousBottom = body.position.y + previousHalf.y
-        let half = Vec2(clampedWidth * 0.5, clampedHeight * 0.5)
+        let half = Vec2(newRadius, clampedHeight * 0.5)
         body.size = half
-        body.capsuleRadius = min(half.x, half.y)
+        body.capsuleRadius = newRadius
         body.position.y = previousBottom - half.y
         pushColliderState()
     }
@@ -293,9 +380,59 @@ extension CharacterController {
         MovementSnapshot(
             position: body.position,
             velocity: body.velocity,
-            grounded: collisions.grounded,
+            grounded: supportContact != nil,
             facing: facing,
             phase: movementPhase
         )
+    }
+}
+
+private extension CharacterController {
+    func normalized(_ v: Vec2) -> Vec2 {
+        let len = simd_length(v)
+        if len <= 1e-8 { return Vec2(0, 0) }
+        return v / len
+    }
+
+    func footParameters() -> (center: Vec2, radius: Double) {
+        let radius = body.capsuleRadius
+        let offset = max(0, body.size.y - radius)
+        let center = Vec2(body.position.x, body.position.y + offset)
+        return (center, radius)
+    }
+
+    func selectSupportContact() -> SurfaceContact? {
+        var best: SurfaceContact?
+        for contact in collisions.ground {
+            guard let collider = world.collider(for: contact.other) else { continue }
+            if !isSupportCandidate(contact, collider: collider) { continue }
+            if let current = best {
+                if contact.depth > current.depth { best = contact }
+            } else {
+                best = contact
+            }
+        }
+        return best
+    }
+
+    func isSupportCandidate(_ contact: SurfaceContact, collider: Collider) -> Bool {
+        let verticalThreshold = -0.2
+        if contact.normal.y > verticalThreshold { return false }
+
+        switch collider.shape {
+        case .ramp:
+            return true
+        default:
+            let footX = body.position.x
+            let radius = body.capsuleRadius
+            let width = collider.aabb.max.x - collider.aabb.min.x
+            let inset = max(0.5, min(width * 0.45, radius * 0.6))
+            if footX < collider.aabb.min.x - radius * 0.25 { return false }
+            if footX > collider.aabb.max.x + radius * 0.25 { return false }
+            let x = contact.point.x
+            if x <= collider.aabb.min.x + inset { return false }
+            if x >= collider.aabb.max.x - inset { return false }
+            return true
+        }
     }
 }
